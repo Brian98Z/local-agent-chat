@@ -34,6 +34,10 @@
         <div class="registration-box"><div><strong id="registration-status">登记状态未知</strong><p class="hint">关闭登记不影响已批准成员。</p></div><button id="registration-button" class="secondary compact" type="button" disabled>开启登记</button></div>
         <p id="agents-empty" class="empty">连接后查看成员与待审批请求。</p>
         <ul id="agent-list" class="card-list" aria-label="成员名单"></ul>
+        <div class="bulk-actions">
+          <button id="bulk-approve" class="secondary compact" type="button" disabled>全部批准</button>
+          <button id="bulk-revoke" class="secondary compact danger" type="button" disabled>全部撤销</button>
+        </div>
       </section>
 
       <section class="panel chat-panel" aria-labelledby="chat-heading">
@@ -41,6 +45,7 @@
         <div class="conversation-toolbar">
           <div class="field"><label for="conversation-select">历史对话</label><select id="conversation-select" disabled><option value="">连接后加载对话</option></select></div>
           <button id="new-conversation-button" type="button" disabled>新建对话</button>
+          <button id="delete-conversation-button" class="secondary compact danger" type="button" disabled>删除对话</button>
           <p class="hint">默认继续上次对话。切换对话会同步到所有客户端，不影响历史内容与成员审批。</p>
         </div>
         <div id="message-scroll" class="message-scroll" tabindex="0" aria-label="消息历史"><p id="messages-empty" class="empty">连接后加载完整消息历史。</p><ol id="message-list" class="message-list" aria-label="全部消息"></ol></div>

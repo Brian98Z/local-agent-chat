@@ -205,6 +205,7 @@ function start(config) {
         nameKey TEXT NOT NULL UNIQUE,
         tokenHash TEXT NOT NULL UNIQUE,
         status TEXT NOT NULL CHECK (status IN ('pending','active','paused','revoked')),
+        model TEXT NOT NULL DEFAULT '',
         createdAt TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS messages (
@@ -243,6 +244,9 @@ function start(config) {
         db.exec(`ALTER TABLE ${table} ADD COLUMN conversationId INTEGER NOT NULL DEFAULT 1 CHECK (conversationId > 0)`);
       }
     }
+    if (!db.prepare('PRAGMA table_info(agents)').all().some((column) => column.name === 'model')) {
+      db.exec("ALTER TABLE agents ADD COLUMN model TEXT NOT NULL DEFAULT ''");
+    }
     db.exec(`
       CREATE INDEX IF NOT EXISTS messages_conversation_id ON messages(conversationId,id);
       CREATE INDEX IF NOT EXISTS tasks_conversation_id ON tasks(conversationId,id);
@@ -271,8 +275,8 @@ function start(config) {
       throw error;
     }
   }
-  const publicAgent = (row) => ({ id: row.id, name: row.name, status: row.status, createdAt: row.createdAt });
-  const getAgent = (id) => sql('SELECT id,name,status,createdAt FROM agents WHERE id = ?').get(id);
+  const publicAgent = (row) => ({ id: row.id, name: row.name, status: row.status, model: row.model, createdAt: row.createdAt });
+  const getAgent = (id) => sql('SELECT id,name,status,model,createdAt FROM agents WHERE id = ?').get(id);
   const getTask = (id) => sql('SELECT * FROM tasks WHERE id = ?').get(id);
   const allTasks = (conversationId) => sql('SELECT * FROM tasks WHERE conversationId = ? ORDER BY id').all(conversationId);
   const audit = (actor, action, target, now) => sql('INSERT INTO audit (actor,action,target,createdAt) VALUES (?,?,?,?)').run(actor, action, String(target), now);
@@ -299,6 +303,39 @@ function start(config) {
   function defaultConversationTitle(now) {
     const pad = (value) => String(value).padStart(2, '0');
     return `对话 ${now.getFullYear()}/${pad(now.getMonth() + 1)}/${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  }
+
+  // Summarize the first human instruction locally; the service never calls a model.
+  function deriveConversationTitle(source) {
+    let value = String(source)
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/`[^`]*`/g, ' ')
+      .replace(/https?:\/\/\S+/gi, ' ')
+      .replace(/[`*_#>~|]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/^(?:[-+*]|\d+[.)])\s+/, '');
+    if (!value) return null;
+    const sentence = value.match(/^[\s\S]*?[。！？!?；;]/);
+    if (sentence) value = sentence[0].trim();
+    const characters = [...value];
+    return characters.length <= 40 ? value : `${characters.slice(0, 40).join('')}…`;
+  }
+
+  function autoTitleConversation(conversationId, source) {
+    const conversation = getConversation(conversationId);
+    if (!conversation) return;
+    let eligible = false;
+    const created = new Date(conversation.createdAt);
+    if (!Number.isNaN(created.getTime()) && conversation.title === defaultConversationTitle(created)) eligible = true;
+    if (conversation.title === '初始对话') {
+      const counts = sql('SELECT (SELECT COUNT(*) FROM messages WHERE conversationId = ? AND "from" = \'admin\') AS adminMessages, (SELECT COUNT(*) FROM tasks WHERE conversationId = ?) AS tasks').get(conversationId, conversationId);
+      eligible = counts.adminMessages <= 1 && counts.tasks <= 1;
+    }
+    if (!eligible) return;
+    const title = deriveConversationTitle(source);
+    if (!title || title === conversation.title) return;
+    sql('UPDATE conversations SET title = ? WHERE id = ? AND title = ?').run(title, conversationId, conversation.title);
   }
 
   function visibleMessages(actor, conversationId, after, limit) {
@@ -329,10 +366,15 @@ function start(config) {
       if (requirement === 'agent') fail(403, 'An agent identity is required.');
       return { id: 'admin', admin: true };
     }
-    const row = sql('SELECT id,name,status,createdAt FROM agents WHERE tokenHash = ?').get(hash);
+    const row = sql('SELECT id,name,status,model,createdAt FROM agents WHERE tokenHash = ?').get(hash);
     if (!row) fail(401, 'A valid bearer token is required.');
     if (requirement === 'admin') fail(403, 'Administrator authorization is required.');
-    if (requirement === 'active' && row.status !== 'active') fail(403, 'Agent is not active; administrator approval is required.');
+    // Muted (paused) members keep read access; only active members may write.
+    if (requirement === 'active' && row.status !== 'active') {
+      if (row.status === 'paused') fail(403, 'Agent is muted; write operations are not allowed.');
+      fail(403, 'Agent is not active; administrator approval is required.');
+    }
+    if (requirement === 'member' && row.status !== 'active' && row.status !== 'paused') fail(403, 'Agent is not active; administrator approval is required.');
     return { ...row, admin: false };
   }
 
@@ -358,7 +400,7 @@ function start(config) {
       function check(timedOut = false) {
         if (settled) return;
         try {
-          const actor = authenticate(request);
+          const actor = authenticate(request, 'member');
           const activeId = activeConversationId();
           if (activeId !== conversationId) {
             finish(null, { conversationId: activeId, changed: true, messages: [], cursor: 0, reason: 'conversation_changed' });
@@ -391,7 +433,7 @@ function start(config) {
       // Only authorization is polled; conversation/message reads are event-driven.
       authorizationTimer = setInterval(() => {
         try {
-          authenticate(request);
+          authenticate(request, 'member');
         } catch (error) {
           finish(error);
         }
@@ -426,19 +468,24 @@ function start(config) {
 
     if (path === '/api/join' && method === 'POST') {
       const body = await jsonBody(request);
-      fields(body, ['name', 'token'], ['name', 'token']);
+      fields(body, ['name', 'token', 'model'], ['name', 'token', 'model']);
       const name = text(body.name, 'name', 1, 64, true);
+      const model = text(body.model, 'model', 1, 80, true);
       if (typeof body.token !== 'string' || !TOKEN_PATTERN.test(body.token)) fail(400, 'token must be 64 hexadecimal characters.');
       const hash = tokenHash(body.token);
-      const existing = sql('SELECT id,name,status,createdAt FROM agents WHERE tokenHash = ?').get(hash);
-      if (existing) return send(response, 200, { agent: publicAgent(existing) });
+      const existing = sql('SELECT id,name,status,model,createdAt FROM agents WHERE tokenHash = ?').get(hash);
+      if (existing) {
+        // The model declaration is fixed after the first successful registration.
+        if (!existing.model) sql('UPDATE agents SET model = ? WHERE id = ?').run(model, existing.id);
+        return send(response, 200, { agent: publicAgent(getAgent(existing.id)) });
+      }
       const nameKey = name.toLowerCase();
       if (sql('SELECT id FROM agents WHERE nameKey = ?').get(nameKey)) fail(409, 'Name is already registered.');
       if (!registrationOpen) fail(403, 'New registration is closed.');
       const now = new Date().toISOString();
       const id = randomUUID();
       transaction(() => {
-        sql("INSERT INTO agents (id,name,nameKey,tokenHash,status,createdAt) VALUES (?,?,?,?,'pending',?)").run(id, name, nameKey, hash, now);
+        sql("INSERT INTO agents (id,name,nameKey,tokenHash,status,model,createdAt) VALUES (?,?,?,?,'pending',?,?)").run(id, name, nameKey, hash, model, now);
         audit(id, 'agent.join', id, now);
       });
       return send(response, 201, { agent: getAgent(id) });
@@ -449,7 +496,7 @@ function start(config) {
     }
 
     if (path === '/api/conversations' && method === 'GET') {
-      authenticate(request);
+      authenticate(request, 'member');
       return send(response, 200, { conversations: allConversations(), activeConversationId: activeConversationId() });
     }
 
@@ -488,6 +535,33 @@ function start(config) {
       return send(response, 200, { conversation, activeConversationId: conversation.id });
     }
 
+    const deleteConversationMatch = /^\/api\/admin\/conversations\/([^/]+)\/delete$/.exec(path);
+    if (deleteConversationMatch && method === 'POST') {
+      authenticate(request, 'admin');
+      const id = integer(deleteConversationMatch[1], 'conversation id', 1, Number.MAX_SAFE_INTEGER);
+      const body = await jsonBody(request);
+      authenticate(request, 'admin');
+      fields(body, []);
+      const now = new Date().toISOString();
+      const result = transaction(() => {
+        const conversation = getConversation(id);
+        if (!conversation) fail(404, 'Conversation not found.');
+        const count = sql('SELECT COUNT(*) AS count FROM conversations').get().count;
+        if (count <= 1) fail(409, 'Cannot delete the last conversation.');
+        if (activeConversationId() === id) {
+          const next = sql('SELECT id FROM conversations WHERE id != ? ORDER BY id DESC LIMIT 1').get(id).id;
+          sql('UPDATE conversation_state SET activeConversationId = ? WHERE id = 1').run(next);
+        }
+        sql('DELETE FROM messages WHERE conversationId = ?').run(id);
+        sql('DELETE FROM tasks WHERE conversationId = ?').run(id);
+        sql('DELETE FROM conversations WHERE id = ?').run(id);
+        audit('admin', 'conversation.delete', id, now);
+        return { deletedId: id, activeConversationId: activeConversationId() };
+      });
+      wakeEventWaiters();
+      return send(response, 200, { ...result, conversations: allConversations() });
+    }
+
     if (path === '/api/admin/state' && method === 'GET') {
       authenticate(request, 'admin');
       const conversationId = activeConversationId();
@@ -495,7 +569,7 @@ function start(config) {
         registrationOpen,
         conversations: allConversations(),
         activeConversationId: conversationId,
-        agents: sql('SELECT id,name,status,createdAt FROM agents ORDER BY createdAt,id').all(),
+        agents: sql('SELECT id,name,status,model,createdAt FROM agents ORDER BY createdAt,id').all(),
         messages: sql('SELECT * FROM messages WHERE conversationId = ? ORDER BY id DESC LIMIT 200').all(conversationId).reverse(),
         tasks: allTasks(conversationId),
         audit: sql('SELECT * FROM audit ORDER BY id DESC LIMIT 200').all().reverse(),
@@ -511,6 +585,33 @@ function start(config) {
       audit('admin', body.open ? 'registration.open' : 'registration.close', 'registration', new Date().toISOString());
       registrationOpen = body.open;
       return send(response, 200, { registrationOpen });
+    }
+
+    if (path === '/api/admin/agents/bulk' && method === 'POST') {
+      authenticate(request, 'admin');
+      const body = await jsonBody(request);
+      authenticate(request, 'admin');
+      fields(body, ['action'], ['action']);
+      if (!['approve', 'revoke'].includes(body.action)) fail(400, 'Invalid bulk action.');
+      const now = new Date().toISOString();
+      const result = transaction(() => {
+        const status = body.action === 'approve' ? 'active' : 'revoked';
+        const targets = body.action === 'approve'
+          ? sql("SELECT id FROM agents WHERE status = 'pending'").all()
+          : sql("SELECT id FROM agents WHERE status != 'revoked'").all();
+        for (const target of targets) {
+          sql('UPDATE agents SET status = ? WHERE id = ?').run(status, target.id);
+          audit('admin', `agent.${status}`, target.id, now);
+          if (status === 'revoked') {
+            const released = sql("SELECT id FROM tasks WHERE owner = ? AND status = 'claimed'").all(target.id);
+            sql("UPDATE tasks SET status = 'open',owner = NULL,updatedAt = ? WHERE owner = ? AND status = 'claimed'").run(now, target.id);
+            for (const task of released) audit('admin', 'task.release', task.id, now);
+          }
+        }
+        return { updated: targets.length };
+      });
+      wakeEventWaiters();
+      return send(response, 200, { action: body.action, updated: result.updated });
     }
 
     const adminAgentMatch = /^\/api\/admin\/agents\/([^/]+)$/.exec(path);
@@ -541,15 +642,15 @@ function start(config) {
     }
 
     if (path === '/api/agents' && method === 'GET') {
-      const actor = authenticate(request);
+      const actor = authenticate(request, 'member');
       const agents = actor.admin
-        ? sql('SELECT id,name,status,createdAt FROM agents ORDER BY createdAt,id').all()
-        : sql("SELECT id,name,status,createdAt FROM agents WHERE status = 'active' ORDER BY createdAt,id").all();
+        ? sql('SELECT id,name,status,model,createdAt FROM agents ORDER BY createdAt,id').all()
+        : sql("SELECT id,name,status,model,createdAt FROM agents WHERE status = 'active' ORDER BY createdAt,id").all();
       return send(response, 200, { agents });
     }
 
     if (path === '/api/events' && method === 'GET') {
-      authenticate(request);
+      authenticate(request, 'member');
       for (const key of url.searchParams.keys()) {
         if (!['conversationId', 'after', 'timeout'].includes(key)) fail(400, 'Unknown event parameter.');
         if (url.searchParams.getAll(key).length > 1) fail(400, 'Repeated event parameter.');
@@ -563,7 +664,7 @@ function start(config) {
     }
 
     if (path === '/api/messages' && method === 'GET') {
-      const actor = authenticate(request);
+      const actor = authenticate(request, 'member');
       const conversationId = readConversationId(url.searchParams);
       if (url.searchParams.getAll('after').length > 1 || url.searchParams.getAll('limit').length > 1) fail(400, 'Repeated pagination parameter.');
       const after = integer(url.searchParams.get('after') ?? '0', 'after', 0, Number.MAX_SAFE_INTEGER);
@@ -575,7 +676,7 @@ function start(config) {
     if (path === '/api/messages' && method === 'POST') {
       authenticate(request);
       const body = await jsonBody(request);
-      // Recheck after receiving the body: an administrator may have paused this agent.
+      // Recheck after receiving the body: an administrator may have muted this agent.
       const actor = authenticate(request);
       fields(body, ['text', 'to', 'conversationId'], ['text']);
       const messageText = text(body.text, 'text', 1, 8000);
@@ -588,14 +689,16 @@ function start(config) {
       const message = transaction(() => {
         const conversationId = writeConversationId(body);
         const result = sql('INSERT INTO messages ("from","to",text,createdAt,conversationId) VALUES (?,?,?,?,?)').run(actor.id, to, messageText, new Date().toISOString(), conversationId);
-        return sql('SELECT * FROM messages WHERE id = ?').get(result.lastInsertRowid);
+        const row = sql('SELECT * FROM messages WHERE id = ?').get(result.lastInsertRowid);
+        if (actor.admin) autoTitleConversation(conversationId, messageText);
+        return row;
       });
       wakeEventWaiters();
       return send(response, 201, { message });
     }
 
     if (path === '/api/tasks' && method === 'GET') {
-      authenticate(request);
+      authenticate(request, 'member');
       const conversationId = readConversationId(url.searchParams);
       return send(response, 200, { tasks: allTasks(conversationId), conversationId });
     }
@@ -612,7 +715,9 @@ function start(config) {
         const conversationId = writeConversationId(body);
         const result = sql("INSERT INTO tasks (title,description,status,owner,createdBy,createdAt,updatedAt,note,conversationId) VALUES (?,?,'open',NULL,?,?,?,'',?)").run(title, description, actor.id, now, now, conversationId);
         audit(actor.id, 'task.create', result.lastInsertRowid, now);
-        return getTask(result.lastInsertRowid);
+        const row = getTask(result.lastInsertRowid);
+        if (actor.admin) autoTitleConversation(conversationId, title);
+        return row;
       });
       return send(response, 201, { task });
     }
@@ -655,7 +760,7 @@ function start(config) {
       return send(response, 200, { task });
     }
 
-    if (['/api/join', '/api/me', '/api/admin/state', '/api/admin/registration', '/api/admin/conversations', '/api/conversations', '/api/agents', '/api/messages', '/api/tasks', '/api/events'].includes(path) || adminAgentMatch || activateConversationMatch || taskMatch) {
+    if (['/api/join', '/api/me', '/api/admin/state', '/api/admin/registration', '/api/admin/conversations', '/api/conversations', '/api/agents', '/api/messages', '/api/tasks', '/api/events'].includes(path) || adminAgentMatch || activateConversationMatch || deleteConversationMatch || taskMatch) {
       fail(405, 'Method not allowed.');
     }
     fail(404, 'Not found.');

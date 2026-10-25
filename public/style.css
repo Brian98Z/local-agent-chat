@@ -87,6 +87,8 @@ h3 { font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
 .member-card { border: 1px solid var(--line); padding: 13px; border-radius: 9px; }
 .card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .member-name { font-size: 14px; overflow-wrap: anywhere; }
+.member-model { font-size: 11px; color: var(--muted); margin: 2px 0 0; overflow-wrap: anywhere; }
+.bulk-actions { display: flex; gap: 8px; margin-top: 12px; }
 .identity { font-size: 10px; display: block; color: #758278; overflow-wrap: anywhere; margin-top: 3px; }
 .badge { display: inline-block; font-size: 10px; padding: 2px 7px; border-radius: 5px; background: #eef0ed; color: #69746b; white-space: nowrap; }
 .badge.active, .badge.claimed { color: #27674b; background: #e6f1e6; }

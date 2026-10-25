@@ -1,7 +1,7 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const statusLabels = { pending: '待审批', active: '已批准', paused: '已暂停', revoked: '已撤销', open: '待认领', claimed: '进行中', done: '已完成' };
+const statusLabels = { pending: '待审批', active: '已批准', paused: '已禁言', revoked: '已撤销', open: '待认领', claimed: '进行中', done: '已完成' };
 const actionLabels = { claim: '认领', release: '释放', complete: '完成', reopen: '重新打开' };
 const agentCards = new Map();
 const taskCards = new Map();
@@ -55,6 +55,9 @@ function updateControls() {
     $(id).disabled = !enabled;
   }
   if ($('message-recipient').selectedOptions[0]?.disabled) $('message-submit').disabled = true;
+  $('bulk-approve').disabled = !enabled || !state?.agents.some((agent) => agent.status === 'pending');
+  $('bulk-revoke').disabled = !enabled || !state?.agents.some((agent) => agent.status !== 'revoked');
+  $('delete-conversation-button').disabled = !enabled || !state || state.conversations.length <= 1;
   for (const button of document.querySelectorAll('[data-operation]')) button.disabled = !enabled;
   for (const note of document.querySelectorAll('.task-note')) note.disabled = !enabled;
 }
@@ -142,8 +145,9 @@ function acceptConversation(result) {
   renderConversations();
 }
 function renderAgents() {
-  pruneCards(agentCards, state.agents.map((agent) => agent.id));
-  for (const agent of state.agents) {
+  const members = state.agents.filter((agent) => agent.status !== 'revoked');
+  pruneCards(agentCards, members.map((agent) => agent.id));
+  for (const agent of members) {
     let card = agentCards.get(agent.id);
     if (!card) {
       const root = node('li', 'member-card');
@@ -152,30 +156,31 @@ function renderAgents() {
       const name = node('strong', 'member-name');
       const badge = node('span', 'badge');
       heading.append(name, badge);
+      const model = node('p', 'member-model');
       const id = node('code', 'identity', agent.id);
       const actions = node('div', 'card-actions');
-      root.append(heading, id, actions);
-      card = { root, name, badge, actions, status: null };
+      root.append(heading, model, id, actions);
+      card = { root, name, badge, model, actions, status: null };
       agentCards.set(agent.id, card);
       $('agent-list').append(root);
     }
     setText(card.name, agent.name);
+    setText(card.model, `模型 · ${agent.model || '未声明'}`);
     setText(card.badge, statusLabels[agent.status] ?? agent.status);
     card.badge.className = `badge ${agent.status}`;
     if (card.status !== agent.status) {
       card.status = agent.status;
       card.actions.replaceChildren();
-      const transitions = { pending: [['active', '批准'], ['revoked', '撤销']], active: [['paused', '暂停'], ['revoked', '撤销']], paused: [['active', '恢复'], ['revoked', '撤销']], revoked: [] };
+      const transitions = { pending: [['active', '批准'], ['revoked', '撤销']], active: [['paused', '禁言'], ['revoked', '撤销']], paused: [['active', '解禁'], ['revoked', '撤销']], revoked: [] };
       for (const [status, label] of transitions[agent.status] ?? []) {
         const button = actionButton(label, status, () => mutate(`/api/admin/agents/${encodeURIComponent(agent.id)}`, { status }, `已${label} ${agent.name}。`), status === 'revoked');
         button.setAttribute('aria-label', `${label} ${agent.name}`);
         card.actions.append(button);
       }
-      if (agent.status === 'revoked') card.actions.append(node('span', 'hint', '身份已永久撤销'));
     }
   }
-  setText($('agent-count'), state.agents.length);
-  $('agents-empty').hidden = state.agents.length > 0;
+  setText($('agent-count'), members.length);
+  $('agents-empty').hidden = members.length > 0;
   setText($('agents-empty'), '暂无成员。开启登记后，让智能体提交自己的名字与接入请求。');
 }
 function renderRecipients(selected = $('message-recipient').value) {
@@ -449,6 +454,16 @@ $('disconnect-button').addEventListener('click', disconnect);
 $('new-conversation-button').addEventListener('click', () => {
   void mutate('/api/admin/conversations', {}, '已新建对话，历史内容已保留。', acceptConversation);
 });
+$('delete-conversation-button').addEventListener('click', () => {
+  const id = activeConversationId;
+  const conversation = state?.conversations.find((row) => row.id === id);
+  if (!conversation) return;
+  if (!window.confirm(`删除当前对话「${conversation.title}」及其全部消息和任务？此操作不可恢复。`)) return;
+  void mutate(`/api/admin/conversations/${id}/delete`, {}, '对话已删除。', () => {
+    conversationDrafts.delete(id);
+    activeConversationId = null;
+  });
+});
 $('conversation-select').addEventListener('change', () => {
   const id = Number($('conversation-select').value);
   $('conversation-select').value = String(activeConversationId);
@@ -459,6 +474,16 @@ $('registration-button').addEventListener('click', () => {
   if (!state) return;
   const open = !state.registrationOpen;
   void mutate('/api/admin/registration', { open }, open ? '已开启新成员登记。' : '已关闭新成员登记。');
+});
+$('bulk-approve').addEventListener('click', () => {
+  void mutate('/api/admin/agents/bulk', { action: 'approve' }, '全部待审批成员已批准。');
+});
+$('bulk-revoke').addEventListener('click', () => {
+  if (!state) return;
+  const count = state.agents.filter((agent) => agent.status !== 'revoked').length;
+  if (!count) return;
+  if (!window.confirm(`将撤销全部 ${count} 名成员，并释放其未完成任务。此操作不可恢复，继续？`)) return;
+  void mutate('/api/admin/agents/bulk', { action: 'revoke' }, '全部成员已撤销。');
 });
 $('message-recipient').addEventListener('change', updateControls);
 $('message-form').addEventListener('submit', (event) => {

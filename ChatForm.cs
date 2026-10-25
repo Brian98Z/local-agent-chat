@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Globalization;
+using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -25,15 +26,25 @@ internal sealed class ChatForm : Form
     private readonly Color ink = Color.FromArgb(27, 43, 62);
     private readonly Color muted = Color.FromArgb(116, 131, 148);
     private readonly Color green = Color.FromArgb(0, 139, 132);
-    private ListView agentList, auditList, conversationList;
-    private Button registrationButton, approveButton, pauseButton, revokeButton, sendButton, newConversationButton;
+    private ListView auditList, conversationList;
+    private Panel memberList;
+    private SlimScrollBar memberScroll;
+    private Label memberEmpty;
+    private Button registrationButton, sendButton, newConversationButton;
     private ComboBox recipientBox;
     private TextBox messageInput;
     private HistoryPanel messageHistory;
-    private Label groupTitle, groupSubtitle, memberSummary, auditEmpty, statusLabel, errorLabel, connectionLabel;
+    private Label groupTitle, groupSubtitle, memberSummary, memberHeading, auditEmpty, statusLabel, errorLabel, connectionLabel;
+    private Button bulkApproveButton, bulkRevokeButton;
+    private readonly Dictionary<string, MemberRow> memberRows = new Dictionary<string, MemberRow>();
+    private MemberWheelFilter memberWheelFilter;
+    private int memberScrollOffset, memberContentHeight;
+    private bool layingOutMembers;
+    private int hoverConversationIndex = -1;
+    private bool hoverConversationDelete, suppressConversationSelection;
     private bool registrationOpen, connected, syncing, mutating, stopping, rendering;
     private long cursor, activeConversationId;
-    private int messageCount;
+    private int messageCount, conversationCount;
     private string recipientsSignature = "";
 
     public ChatForm(string baseUrl, string adminToken)
@@ -46,8 +57,8 @@ internal sealed class ChatForm : Form
         Font = new Font("Microsoft YaHei UI", 9F);
         ForeColor = ink;
         BackColor = Color.White;
-        MinimumSize = new Size(1000, 680);
-        Size = new Size(1240, 820);
+        MinimumSize = new Size(1080, 700);
+        Size = new Size(1360, 860);
         StartPosition = FormStartPosition.CenterScreen;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
         catch (ArgumentException) { }
@@ -59,6 +70,8 @@ internal sealed class ChatForm : Form
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
         BuildWindow();
         WireEvents();
+        memberWheelFilter = new MemberWheelFilter(this);
+        Application.AddMessageFilter(memberWheelFilter);
         UpdateButtons();
     }
 
@@ -88,7 +101,7 @@ internal sealed class ChatForm : Form
 
     private ListView MakeList(string name, params string[] columns)
     {
-        var list = Identify(new ListView(), name, name == "AgentList" ? "群成员列表" : name == "ConversationList" ? "历史对话列表" : "操作审计列表");
+        var list = Identify(new ListView(), name, name == "ConversationList" ? "历史对话列表" : "操作审计列表");
         list.Dock = DockStyle.Fill;
         list.View = View.Details;
         list.FullRowSelect = true;
@@ -102,10 +115,20 @@ internal sealed class ChatForm : Form
         return list;
     }
 
+    private Button MakeDangerButton(string name, string text)
+    {
+        var button = Identify(new ModernButton(false, false, true), name, text);
+        button.Text = text;
+        button.AutoSize = false;
+        button.MinimumSize = Size.Empty;
+        button.Cursor = Cursors.Hand;
+        return button;
+    }
+
     private void BuildWindow()
     {
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3, Margin = Padding.Empty };
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 274));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 310));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -117,20 +140,31 @@ internal sealed class ChatForm : Form
         main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var heading = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Color.White, Padding = new Padding(24, 14, 22, 12), ColumnCount = 2, RowCount = 2, Margin = Padding.Empty };
         heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 126));
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
         heading.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
         heading.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
-        groupTitle = Identify(new Label { Text = "本地协作群", Dock = DockStyle.Fill, Font = new Font(Font.FontFamily, 15F, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true }, "GroupTitle", "本地协作群");
+        groupTitle = Identify(new Label { Text = "本地协作群", Dock = DockStyle.Fill, Font = new Font(Font.FontFamily, 16F, FontStyle.Bold), ForeColor = ink, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true }, "GroupTitle", "本地协作群");
         groupSubtitle = new Label { Text = "人工指令 · 实时协作", Dock = DockStyle.Fill, ForeColor = muted, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
         connectionLabel = Identify(new Label { Text = "●  正在连接", Dock = DockStyle.Fill, ForeColor = muted, TextAlign = ContentAlignment.MiddleRight }, "ConnectionIndicator", "正在连接本机服务");
+        var headingActions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
         var auditButton = MakeButton("AuditToggle", "操作审计", false);
-        auditButton.Dock = DockStyle.Fill;
-        auditButton.Margin = new Padding(12, 0, 0, 0);
+        auditButton.Dock = DockStyle.None;
+        auditButton.Size = new Size(92, 32);
         auditButton.MinimumSize = Size.Empty;
+        auditButton.Margin = new Padding(8, 0, 0, 0);
+        var docButton = MakeButton("McpDocButton", "接入文档", false);
+        docButton.Dock = DockStyle.None;
+        docButton.Size = new Size(92, 32);
+        docButton.MinimumSize = Size.Empty;
+        docButton.Margin = new Padding(8, 0, 0, 0);
+        docButton.AccessibleName = "保存 MCP 接入文档";
+        docButton.Click += delegate { SaveConnectionDocument(); };
+        headingActions.Controls.Add(auditButton);
+        headingActions.Controls.Add(docButton);
         heading.Controls.Add(groupTitle, 0, 0);
         heading.Controls.Add(groupSubtitle, 0, 1);
         heading.Controls.Add(connectionLabel, 1, 0);
-        heading.Controls.Add(auditButton, 1, 1);
+        heading.Controls.Add(headingActions, 1, 1);
         main.Controls.Add(heading, 0, 0);
         var workspace = Identify(new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty }, "WorkspaceTabs", "群聊与审计");
         Control chat = BuildChat();
@@ -167,42 +201,76 @@ internal sealed class ChatForm : Form
 
     private Control BuildMembers()
     {
-        var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 9, Padding = new Padding(18, 16, 16, 14), BackColor = Color.FromArgb(246, 248, 251), Margin = Padding.Empty };
-        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
-        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-        sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 38));
-        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 9, Padding = new Padding(16, 16, 14, 12), BackColor = Color.FromArgb(245, 248, 251), Margin = Padding.Empty };
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 34));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 62));
-        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 90));
-        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 66));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+        var conversationActions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 1, Margin = new Padding(0, 0, 0, 4) };
+        conversationActions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         newConversationButton = MakeButton("NewConversationButton", "新建对话", true);
         newConversationButton.Dock = DockStyle.Fill;
-        sidebar.Controls.Add(newConversationButton, 0, 0);
-        sidebar.Controls.Add(new Label { Text = "历史对话", Dock = DockStyle.Fill, ForeColor = muted, TextAlign = ContentAlignment.MiddleLeft }, 0, 1);
+        newConversationButton.MinimumSize = Size.Empty;
+        newConversationButton.Margin = Padding.Empty;
+        conversationActions.Controls.Add(newConversationButton, 0, 0);
+        sidebar.Controls.Add(conversationActions, 0, 0);
+        sidebar.Controls.Add(new Label { Text = "历史对话", Dock = DockStyle.Fill, ForeColor = muted, Font = new Font(Font.FontFamily, 8.5F), TextAlign = ContentAlignment.MiddleLeft }, 0, 1);
         conversationList = MakeList("ConversationList", "对话");
         conversationList.HeaderStyle = ColumnHeaderStyle.None;
-        conversationList.Columns[0].Width = 210;
-        conversationList.Resize += delegate { conversationList.Columns[0].Width = Math.Max(80, conversationList.ClientSize.Width - SystemInformation.VerticalScrollBarWidth); };
+        conversationList.BackColor = Color.FromArgb(250, 252, 254);
+        conversationList.Columns[0].Width = 250;
+        conversationList.SmallImageList = new ImageList { ImageSize = new Size(1, Scaled(30)), ColorDepth = ColorDepth.Depth32Bit };
+        conversationList.OwnerDraw = true;
+        conversationList.DrawColumnHeader += delegate(object sender, DrawListViewColumnHeaderEventArgs args) { };
+        conversationList.DrawItem += DrawConversationItem;
+        conversationList.DrawSubItem += delegate(object sender, DrawListViewSubItemEventArgs args) { };
+        conversationList.MouseDown += ConversationMouseDown;
+        conversationList.MouseMove += ConversationMouseMove;
+        conversationList.MouseLeave += delegate { if (hoverConversationIndex != -1) { hoverConversationIndex = -1; conversationList.Invalidate(); } conversationList.Cursor = Cursors.Default; };
+        conversationList.MouseUp += ConversationMouseUp;
+        conversationList.KeyDown += ConversationKeyDown;
+        conversationList.Resize += delegate { conversationList.Columns[0].Width = Math.Max(80, conversationList.ClientSize.Width - ConversationGutterWidth); };
         sidebar.Controls.Add(conversationList, 0, 2);
-        sidebar.Controls.Add(new Label { Text = "群成员", Font = new Font(Font.FontFamily, 10F, FontStyle.Bold), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 3);
+        memberHeading = Identify(new Label { Text = "群成员", Font = new Font(Font.FontFamily, 10.5F, FontStyle.Bold), ForeColor = ink, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, "MemberHeading", "群成员");
+        sidebar.Controls.Add(memberHeading, 0, 3);
         registrationButton = MakeButton("RegistrationButton", "开启新成员登记", false);
         registrationButton.Dock = DockStyle.Fill;
+        registrationButton.Margin = new Padding(0, 2, 0, 4);
         sidebar.Controls.Add(registrationButton, 0, 4);
-        memberSummary = new Label { Text = "正在读取成员…", Dock = DockStyle.Fill, ForeColor = muted, TextAlign = ContentAlignment.MiddleLeft };
+        memberSummary = new Label { Text = "正在读取成员…", Dock = DockStyle.Fill, ForeColor = muted, Font = new Font(Font.FontFamily, 8.5F), TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
         sidebar.Controls.Add(memberSummary, 0, 5);
-        agentList = MakeList("AgentList", "名称", "状态");
-        agentList.Columns[0].Width = 150;
-        agentList.Columns[1].Width = 78;
-        sidebar.Controls.Add(agentList, 0, 6);
-        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(0, 10, 0, 0) };
-        approveButton = MakeButton("ApproveButton", "批准 / 恢复", false);
-        pauseButton = MakeButton("PauseButton", "暂停", false);
-        revokeButton = MakeButton("RevokeButton", "撤销", false);
-        actions.Controls.AddRange(new Control[] { approveButton, pauseButton, revokeButton });
-        sidebar.Controls.Add(actions, 0, 7);
-        sidebar.Controls.Add(new Label { Text = "先开启登记，再选择成员批准。\r\n撤销不可恢复；暂停可稍后恢复。", Dock = DockStyle.Fill, ForeColor = muted }, 0, 8);
+        var memberHost = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(245, 248, 251), Margin = new Padding(0, 2, 0, 8) };
+        memberList = Identify(new BufferedPanel { Dock = DockStyle.Fill, AutoScroll = false, BackColor = Color.FromArgb(245, 248, 251), Margin = Padding.Empty }, "AgentList", "群成员列表");
+        memberList.AccessibleRole = AccessibleRole.Pane;
+        memberList.Resize += delegate { LayoutMemberRows(); };
+        memberScroll = new SlimScrollBar { Name = "MemberScrollBar", AccessibleName = "群成员列表滚动条" };
+        memberScroll.Visible = false;
+        memberScroll.ValueChanged += delegate { SetMemberScrollOffset(memberScroll.Value); };
+        memberEmpty = new Label { Dock = DockStyle.Fill, Text = "暂无成员\r\n开启登记后，等待智能体申请", TextAlign = ContentAlignment.MiddleCenter, ForeColor = muted, BackColor = Color.FromArgb(245, 248, 251), AutoEllipsis = true, Visible = false };
+        memberHost.Controls.Add(memberList);
+        memberHost.Controls.Add(memberScroll);
+        memberHost.Controls.Add(memberEmpty);
+        memberEmpty.BringToFront();
+        memberHost.Resize += delegate { LayoutMemberScrollbar(); };
+        sidebar.Controls.Add(memberHost, 0, 6);
+        var bulkActions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Padding = new Padding(0, 4, 0, 0), Margin = Padding.Empty };
+        bulkApproveButton = MakeButton("BulkApproveButton", "全部批准", false);
+        bulkApproveButton.AutoSize = false;
+        bulkApproveButton.MinimumSize = Size.Empty;
+        bulkApproveButton.Size = new Size(118, 32);
+        bulkApproveButton.Margin = new Padding(0, 0, 8, 0);
+        bulkRevokeButton = MakeDangerButton("BulkRevokeButton", "全部撤销");
+        bulkRevokeButton.Size = new Size(118, 32);
+        bulkRevokeButton.Margin = new Padding(0, 0, 0, 0);
+        bulkActions.Controls.Add(bulkApproveButton);
+        bulkActions.Controls.Add(bulkRevokeButton);
+        sidebar.Controls.Add(bulkActions, 0, 7);
+        sidebar.Controls.Add(new Label { Text = "单个操作一键生效；禁言可读不可发。\r\n全部批准处理待审批；全部撤销踢出全部成员。", Dock = DockStyle.Fill, ForeColor = muted, Font = new Font(Font.FontFamily, 8.5F) }, 0, 8);
         return sidebar;
     }
 
@@ -278,23 +346,21 @@ internal sealed class ChatForm : Form
         newConversationButton.Click += async delegate { await ChangeConversationAsync(0); };
         conversationList.SelectedIndexChanged += async delegate
         {
-            if (rendering || mutating || !connected || conversationList.SelectedItems.Count == 0) return;
+            if (rendering || mutating || suppressConversationSelection || !connected || conversationList.SelectedItems.Count == 0) return;
             long id;
             if (Int64.TryParse(conversationList.SelectedItems[0].Name, NumberStyles.None, CultureInfo.InvariantCulture, out id) && id != activeConversationId)
                 await ChangeConversationAsync(id);
         };
-        agentList.SelectedIndexChanged += delegate { if (!rendering) UpdateButtons(); };
         recipientBox.SelectedIndexChanged += delegate { UpdateButtons(); };
         messageInput.TextChanged += delegate { UpdateButtons(); };
         registrationButton.Click += async delegate { await MutateAsync("api/admin/registration", new { open = !registrationOpen }, "登记状态已更新。", null); };
-        approveButton.Click += async delegate { await ChangeAgentAsync("active"); };
-        pauseButton.Click += async delegate { await ChangeAgentAsync("paused"); };
-        revokeButton.Click += async delegate
+        bulkApproveButton.Click += async delegate { await BulkChangeAgentsAsync("approve"); };
+        bulkRevokeButton.Click += async delegate
         {
-            AgentData agent = SelectedAgent();
-            if (agent == null) return;
-            if (MessageBox.Show(this, "撤销 “" + agent.Name + "” 后不可恢复，且将释放该成员认领的未完成任务。继续？", "撤销成员", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
-                await ChangeAgentAsync("revoked");
+            int count = memberRows.Count;
+            if (count == 0) return;
+            if (MessageBox.Show(this, "将撤销全部 " + count + " 名成员，并释放其未完成任务。此操作不可恢复，继续？", "全部撤销", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
+                await BulkChangeAgentsAsync("revoke");
         };
         sendButton.Click += async delegate { await SendMessageAsync(); };
         messageInput.KeyDown += async delegate(object sender, KeyEventArgs e)
@@ -307,11 +373,53 @@ internal sealed class ChatForm : Form
         };
     }
 
-    private async Task ChangeAgentAsync(string status)
+    private void SaveConnectionDocument()
     {
-        AgentData agent = SelectedAgent();
-        if (agent == null) return;
-        await MutateAsync("api/admin/agents/" + Uri.EscapeDataString(agent.Id), new { status = status }, "成员状态已更新。", null);
+        string source = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "MCP.md");
+        if (!File.Exists(source))
+        {
+            errorLabel.Text = "未找到 MCP.md，请保留完整项目目录后重试。";
+            errorLabel.AccessibleName = errorLabel.Text;
+            errorLabel.Visible = true;
+            return;
+        }
+        using (var dialog = new SaveFileDialog())
+        {
+            dialog.Title = "保存 MCP 接入文档";
+            dialog.Filter = "Markdown 文档 (*.md)|*.md|所有文件 (*.*)|*.*";
+            dialog.DefaultExt = "md";
+            dialog.AddExtension = true;
+            dialog.OverwritePrompt = true;
+            dialog.FileName = "Agent本地聊天室-MCP连接文档.md";
+            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            if (Directory.Exists(desktop)) dialog.InitialDirectory = desktop;
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            try
+            {
+                File.Copy(source, dialog.FileName, true);
+                errorLabel.Visible = false;
+                statusLabel.Text = "接入文档已保存 · " + dialog.FileName;
+                statusLabel.AccessibleName = statusLabel.Text;
+                statusLabel.ForeColor = muted;
+            }
+            catch (Exception ex)
+            {
+                errorLabel.Text = "保存接入文档失败：" + FriendlyError(ex);
+                errorLabel.AccessibleName = errorLabel.Text;
+                errorLabel.Visible = true;
+            }
+        }
+    }
+
+    private async Task BulkChangeAgentsAsync(string action)
+    {
+        await MutateAsync("api/admin/agents/bulk", new { action = action }, action == "approve" ? "全部待审批成员已批准。" : "全部成员已撤销。", null);
+    }
+
+    private async Task ChangeAgentAsync(string id, string status)
+    {
+        if (String.IsNullOrEmpty(id)) return;
+        await MutateAsync("api/admin/agents/" + Uri.EscapeDataString(id), new { status = status }, "成员状态已更新。", null);
     }
 
     private async Task ChangeConversationAsync(long id)
@@ -521,6 +629,10 @@ internal sealed class ChatForm : Form
                 if (Number(row, "id") == selectedId) title = Value(row, "title");
             }
             if (title == null) throw new ChatClientException("当前对话不在历史列表中，请等待重新同步。");
+            conversationCount = conversationRows.Count;
+            hoverConversationIndex = -1;
+            hoverConversationDelete = false;
+            suppressConversationSelection = false;
             ReconcileList(conversationList, conversationRows);
             ApplyConversation(selectedId, title);
             SelectConversationRow();
@@ -528,19 +640,29 @@ internal sealed class ChatForm : Form
             registrationButton.Text = registrationOpen ? "关闭新成员登记" : "开启新成员登记";
             registrationButton.AccessibleName = registrationButton.Text;
             agents.Clear();
-            int active = 0, pending = 0;
-            var agentRows = new List<string[]>();
+            int active = 0, pending = 0, mutedCount = 0;
+            var visibleAgents = new List<AgentData>();
             foreach (Dictionary<string, object> row in Rows(state, "agents"))
             {
-                var agent = new AgentData { Id = Value(row, "id"), Name = Value(row, "name"), Status = Value(row, "status") };
+                var agent = new AgentData { Id = Value(row, "id"), Name = Value(row, "name"), Status = Value(row, "status"), Model = Value(row, "model") };
                 agents.Add(agent.Id, agent);
+                // Revoked identities stay resolvable for history and audit, but leave the member list.
+                if (agent.Status == "revoked") continue;
                 if (agent.Status == "active") active++;
                 if (agent.Status == "pending") pending++;
-                agentRows.Add(new string[] { agent.Id, agent.Name, StatusName(agent.Status) });
+                if (agent.Status == "paused") mutedCount++;
+                visibleAgents.Add(agent);
             }
-            ReconcileList(agentList, agentRows);
-            memberSummary.Text = agents.Count == 0 ? "暂无成员 · 等待智能体申请" : "已批准 " + active + " · 待审批 " + pending + " · 共 " + agents.Count + " 人";
-            groupSubtitle.Text = active + " 位已批准成员  /  " + (registrationOpen ? "登记开放" : "登记关闭") + "  /  管理员视图";
+            visibleAgents.Sort(delegate(AgentData left, AgentData right)
+            {
+                int rank = MemberRank(left.Status).CompareTo(MemberRank(right.Status));
+                return rank != 0 ? rank : StringComparer.CurrentCultureIgnoreCase.Compare(left.Name, right.Name);
+            });
+            ReconcileMembers(visibleAgents);
+            memberHeading.Text = "群成员 · " + visibleAgents.Count;
+            memberHeading.AccessibleName = memberHeading.Text;
+            memberSummary.Text = visibleAgents.Count == 0 ? "暂无成员 · 开启登记后等待申请" : "已批准 " + active + " · 待审批 " + pending + " · 已禁言 " + mutedCount;
+            groupSubtitle.Text = active + " 位可协作成员" + (mutedCount > 0 ? " · " + mutedCount + " 人禁言" : "") + "  /  " + (registrationOpen ? "登记开放" : "登记关闭") + "  /  管理员视图";
             RenderRecipients();
             var auditRows = new List<string[]>();
             foreach (Dictionary<string, object> row in Rows(state, "audit"))
@@ -550,6 +672,277 @@ internal sealed class ChatForm : Form
             auditEmpty.Text = auditRows.Count == 0 ? "暂无操作记录。" : "最近 " + auditRows.Count + " 条审计记录（服务最多提供最近 200 条）";
         }
         finally { rendering = false; }
+    }
+
+    private int ConversationGutterWidth { get { return Scaled(22); } }
+
+    private int ConversationDeleteLeft(int index)
+    {
+        return conversationList.Columns[0].Width;
+    }
+
+    private void DrawConversationItem(object sender, DrawListViewItemEventArgs e)
+    {
+        Rectangle row = e.Bounds;
+        row.Width = Math.Max(row.Width, conversationList.Columns[0].Width);
+        if (row.Width < 8) return;
+        bool selected = e.Item.Selected;
+        bool hovered = e.ItemIndex == hoverConversationIndex;
+        Color back = selected ? Color.FromArgb(13, 148, 136) : hovered ? Color.FromArgb(234, 246, 244) : Color.FromArgb(250, 252, 254);
+        using (var brush = new SolidBrush(back)) e.Graphics.FillRectangle(brush, row);
+        Color fore = selected ? Color.White : ink;
+        var text = new Rectangle(row.Left + Scaled(10), row.Top, Math.Max(20, row.Width - Scaled(14)), row.Height);
+        TextRenderer.DrawText(e.Graphics, e.Item.Text, Font, text, fore, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        int gutter = conversationList.Columns[0].Width;
+        var icon = new Rectangle(gutter + Scaled(2), row.Top + Scaled(3), Math.Max(12, conversationList.ClientSize.Width - gutter - Scaled(4)), Math.Max(12, row.Height - Scaled(6)));
+        bool canDelete = conversationCount > 1 && !mutating;
+        if (hovered && hoverConversationDelete && canDelete)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath path = RoundedPath(icon, Scaled(8)))
+            using (var fill = new SolidBrush(Color.FromArgb(250, 228, 222)))
+            {
+                e.Graphics.FillPath(fill, path);
+            }
+        }
+        Color glyph = !canDelete ? Color.FromArgb(196, 207, 216) : hovered && hoverConversationDelete ? Color.FromArgb(166, 72, 60) : Color.FromArgb(150, 162, 173);
+        var slot = new Rectangle(gutter, row.Top, Math.Max(ConversationGutterWidth, conversationList.ClientSize.Width - gutter), row.Height);
+        DrawConversationDeleteGlyph(e.Graphics, slot, glyph);
+    }
+
+    // 垃圾桶图标：桶身、桶盖、提手全部用 GraphicsPath 绘制，始终居中在对话行右侧 gutter 内。
+    private void DrawConversationDeleteGlyph(Graphics graphics, Rectangle slot, Color color)
+    {
+        int width = Scaled(14);
+        int height = Scaled(16);
+        var box = new Rectangle(slot.Left + Math.Max(0, (slot.Width - width) / 2), slot.Top + Math.Max(0, (slot.Height - height) / 2), width, height);
+        float unit = Math.Max(0.5f, box.Width / 14f);
+        GraphicsState state = graphics.Save();
+        try
+        {
+            graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var pen = new Pen(color, Math.Max(1.5f, unit * 1.5f)))
+            using (GraphicsPath handle = new GraphicsPath())
+            using (GraphicsPath lid = new GraphicsPath())
+            using (GraphicsPath body = new GraphicsPath())
+            using (var fill = new SolidBrush(Color.FromArgb(24, color)))
+            {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap = LineCap.Round;
+                pen.LineJoin = LineJoin.Round;
+                handle.AddArc(new RectangleF(box.Left + unit * 5f, box.Top + unit * 1.5f, unit * 4f, unit * 6f), 180f, 180f);
+                lid.AddLine(box.Left + unit * 1.5f, box.Top + unit * 4.5f, box.Left + unit * 12.5f, box.Top + unit * 4.5f);
+                body.AddLine(box.Left + unit * 2.5f, box.Top + unit * 6f, box.Left + unit * 4f, box.Top + unit * 15.5f);
+                body.AddLine(box.Left + unit * 4f, box.Top + unit * 15.5f, box.Left + unit * 10f, box.Top + unit * 15.5f);
+                body.AddLine(box.Left + unit * 10f, box.Top + unit * 15.5f, box.Left + unit * 11.5f, box.Top + unit * 6f);
+                body.AddLine(box.Left + unit * 11.5f, box.Top + unit * 6f, box.Left + unit * 2.5f, box.Top + unit * 6f);
+                graphics.DrawPath(pen, handle);
+                graphics.DrawPath(pen, lid);
+                graphics.FillPath(fill, body);
+                graphics.DrawPath(pen, body);
+            }
+        }
+        finally
+        {
+            graphics.Restore(state);
+        }
+    }
+
+    private ListViewItem ConversationItemAtGutter(int x, int y)
+    {
+        return conversationList.GetItemAt(Math.Max(1, conversationList.Columns[0].Width - 2), y);
+    }
+
+    private void ConversationMouseDown(object sender, MouseEventArgs e)
+    {
+        ListViewItem item = ConversationItemAtGutter(e.X, e.Y);
+        suppressConversationSelection = item != null && e.Button == MouseButtons.Left && e.X >= ConversationDeleteLeft(item.Index);
+    }
+
+    private void ConversationMouseMove(object sender, MouseEventArgs e)
+    {
+        ListViewItem item = ConversationItemAtGutter(e.X, e.Y);
+        int index = item == null ? -1 : item.Index;
+        bool onDelete = item != null && e.X >= ConversationDeleteLeft(item.Index);
+        if (index != hoverConversationIndex || onDelete != hoverConversationDelete)
+        {
+            int old = hoverConversationIndex;
+            hoverConversationIndex = index;
+            hoverConversationDelete = onDelete;
+            if (old >= 0 && old < conversationList.Items.Count) conversationList.Invalidate(conversationList.GetItemRect(old));
+            if (index >= 0) conversationList.Invalidate(conversationList.GetItemRect(index));
+        }
+        conversationList.Cursor = onDelete && conversationCount > 1 && !mutating ? Cursors.Hand : Cursors.Default;
+    }
+
+    private async void ConversationMouseUp(object sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+        {
+            suppressConversationSelection = false;
+            return;
+        }
+        ListViewItem item = ConversationItemAtGutter(e.X, e.Y);
+        bool onDelete = item != null && e.X >= ConversationDeleteLeft(item.Index);
+        bool suppressed = suppressConversationSelection;
+        suppressConversationSelection = false;
+        if (!onDelete)
+        {
+            if (suppressed) RestoreConversationSelection();
+            return;
+        }
+        if (conversationCount <= 1 || mutating)
+        {
+            ShowConversationDeleteError();
+            RestoreConversationSelection();
+            return;
+        }
+        long id;
+        if (!Int64.TryParse(item.Name, NumberStyles.None, CultureInfo.InvariantCulture, out id)) return;
+        if (MessageBox.Show(this, "删除对话「" + item.Text + "」及其全部消息和任务？此操作不可恢复。", "删除对话", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
+            await DeleteConversationAsync(id);
+        else
+            RestoreConversationSelection();
+    }
+
+    private async void ConversationKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.KeyCode != Keys.Delete || conversationList.SelectedItems.Count == 0) return;
+        e.Handled = true;
+        e.SuppressKeyPress = true;
+        if (conversationCount <= 1 || mutating)
+        {
+            ShowConversationDeleteError();
+            return;
+        }
+        ListViewItem item = conversationList.SelectedItems[0];
+        long id;
+        if (!Int64.TryParse(item.Name, NumberStyles.None, CultureInfo.InvariantCulture, out id)) return;
+        if (MessageBox.Show(this, "删除对话「" + item.Text + "」及其全部消息和任务？此操作不可恢复。", "删除对话", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
+            await DeleteConversationAsync(id);
+    }
+
+    private void RestoreConversationSelection()
+    {
+        rendering = true;
+        try { SelectConversationRow(); } finally { rendering = false; }
+    }
+
+    private void ShowConversationDeleteError()
+    {
+        errorLabel.Text = "至少需要保留一个对话，无法删除最后一个对话。";
+        errorLabel.AccessibleName = errorLabel.Text;
+        errorLabel.Visible = true;
+    }
+
+    private async Task DeleteConversationAsync(long id)
+    {
+        await MutateAsync("api/admin/conversations/" + id.ToString(CultureInfo.InvariantCulture) + "/delete", new Dictionary<string, object>(), "对话已删除。", delegate(Dictionary<string, object> result) { drafts.Remove(id); });
+    }
+
+    private static int MemberRank(string status)
+    {
+        switch (status)
+        {
+            case "pending": return 0;
+            case "paused": return 1;
+            case "active": return 2;
+            default: return 3;
+        }
+    }
+
+    private void ReconcileMembers(List<AgentData> visible)
+    {
+        var retained = new HashSet<string>();
+        memberList.SuspendLayout();
+        try
+        {
+            foreach (AgentData agent in visible)
+            {
+                retained.Add(agent.Id);
+                MemberRow row;
+                if (!memberRows.TryGetValue(agent.Id, out row))
+                {
+                    row = new MemberRow(agent.Id);
+                    row.Perform = delegate(string status) { var ignored = ChangeAgentAsync(row.AgentId, status); };
+                    memberRows.Add(agent.Id, row);
+                    memberList.Controls.Add(row);
+                }
+                row.UpdateMember(agent.Name, agent.Status, agent.Model, connected && !mutating && !stopping);
+            }
+            var removed = new List<string>();
+            foreach (string id in memberRows.Keys)
+                if (!retained.Contains(id)) removed.Add(id);
+            foreach (string id in removed)
+            {
+                MemberRow row = memberRows[id];
+                memberRows.Remove(id);
+                memberList.Controls.Remove(row);
+                row.Dispose();
+            }
+        }
+        finally { memberList.ResumeLayout(true); }
+        memberEmpty.Visible = visible.Count == 0;
+        LayoutMemberRows();
+    }
+
+    private int Scaled(int value)
+    {
+        return (int)Math.Round(value * DeviceDpi / 96.0);
+    }
+
+    private void LayoutMemberRows()
+    {
+        if (memberList == null || layingOutMembers) return;
+        layingOutMembers = true;
+        try
+        {
+            int width = Math.Max(140, memberList.ClientSize.Width - Scaled(12));
+            int gap = Scaled(8);
+            int content = 0;
+            foreach (Control control in memberList.Controls) content += control.Height + gap;
+            memberContentHeight = Math.Max(0, content - gap);
+            int limit = Math.Max(0, memberContentHeight - memberList.ClientSize.Height);
+            if (memberScrollOffset > limit) memberScrollOffset = limit;
+            if (memberScrollOffset < 0) memberScrollOffset = 0;
+            int y = -memberScrollOffset;
+            foreach (Control control in memberList.Controls)
+            {
+                control.SetBounds(0, y, width, control.Height);
+                y += control.Height + gap;
+            }
+        }
+        finally { layingOutMembers = false; }
+        UpdateMemberScrollbar();
+        LayoutMemberScrollbar();
+    }
+
+    private void SetMemberScrollOffset(int value)
+    {
+        int limit = Math.Max(0, memberContentHeight - memberList.ClientSize.Height);
+        int clamped = Math.Min(Math.Max(0, value), limit);
+        if (clamped == memberScrollOffset) return;
+        memberScrollOffset = clamped;
+        LayoutMemberRows();
+    }
+
+    private void ScrollMembers(int delta)
+    {
+        SetMemberScrollOffset(memberScrollOffset + delta);
+    }
+
+    private void LayoutMemberScrollbar()
+    {
+        if (memberScroll == null || memberScroll.Parent == null) return;
+        int width = Scaled(9), pad = Scaled(1);
+        memberScroll.SetBounds(memberScroll.Parent.ClientSize.Width - width - pad, pad, width, Math.Max(12, memberScroll.Parent.ClientSize.Height - pad * 2));
+        if (memberScroll.Visible) memberScroll.BringToFront();
+    }
+
+    private void UpdateMemberScrollbar()
+    {
+        if (memberScroll == null || memberList == null) return;
+        memberScroll.SetState(memberContentHeight, memberList.ClientSize.Height, memberScrollOffset);
     }
 
     private static void ReconcileList(ListView list, List<string[]> rows)
@@ -680,28 +1073,25 @@ internal sealed class ChatForm : Form
     }
 
 
-    private AgentData SelectedAgent()
-    {
-        AgentData agent;
-        return agentList.SelectedItems.Count > 0 && agents.TryGetValue(agentList.SelectedItems[0].Name, out agent) ? agent : null;
-    }
-
-
     private void UpdateButtons()
     {
         if (registrationButton == null || sendButton == null) return;
         bool ready = connected && !mutating && !stopping;
-        AgentData agent = SelectedAgent();
         newConversationButton.Enabled = ready;
         conversationList.Enabled = ready;
         messageInput.ReadOnly = mutating || activeConversationId <= 0;
         recipientBox.Enabled = ready && activeConversationId > 0;
         registrationButton.Enabled = ready;
-        approveButton.Enabled = ready && agent != null && (agent.Status == "pending" || agent.Status == "paused");
-        approveButton.Text = agent != null && agent.Status == "paused" ? "恢复" : "批准";
-        approveButton.AccessibleName = approveButton.Text;
-        pauseButton.Enabled = ready && agent != null && agent.Status == "active";
-        revokeButton.Enabled = ready && agent != null && agent.Status != "revoked";
+        foreach (MemberRow row in memberRows.Values) row.SetEnabled(ready);
+        int visibleMembers = 0, pendingMembers = 0;
+        foreach (AgentData agent in agents.Values)
+        {
+            if (agent.Status == "revoked") continue;
+            visibleMembers++;
+            if (agent.Status == "pending") pendingMembers++;
+        }
+        bulkApproveButton.Enabled = ready && pendingMembers > 0;
+        bulkRevokeButton.Enabled = ready && visibleMembers > 0;
         Recipient recipient = recipientBox.SelectedItem as Recipient;
         sendButton.Enabled = ready && activeConversationId > 0 && recipient != null && recipient.Available && !String.IsNullOrWhiteSpace(messageInput.Text);
     }
@@ -735,11 +1125,12 @@ internal sealed class ChatForm : Form
         {
             case "conversation.create": return "新建对话";
             case "conversation.activate": return "切换对话";
+            case "conversation.delete": return "删除对话";
             case "registration.open": return "开启成员登记";
             case "registration.close": return "关闭成员登记";
             case "agent.join": return "申请加入";
-            case "agent.active": return "批准或恢复成员";
-            case "agent.paused": return "暂停成员";
+            case "agent.active": return "批准或解禁";
+            case "agent.paused": return "禁言成员";
             case "agent.revoked": return "撤销成员";
             case "task.create": return "创建任务";
             case "task.claim": return "认领任务";
@@ -756,11 +1147,12 @@ internal sealed class ChatForm : Form
         {
             case "Agent not found.": return "成员不存在。";
             case "Recipient not found.": return "消息接收者不存在。";
-            case "Recipient is not active.": return "接收者当前未获批准或已被暂停、撤销，请查看最新成员状态。";
+            case "Recipient is not active.": return "接收者当前未获批准或已被禁言、撤销，请查看最新成员状态。";
             case "Agent status transition is not allowed.": return "当前成员状态不允许此操作，请查看最新成员状态。";
             case "A valid bearer token is required.": return "身份凭据无效或已失效，请关闭并重新打开聊天室。";
             case "Administrator authorization is required.": return "此操作需要管理员授权。";
             case "Agent is not active; administrator approval is required.": return "智能体尚未获准访问，需要管理员批准。";
+            case "Agent is muted; write operations are not allowed.": return "成员已被禁言，暂不能发送消息或变更任务。";
             case "An agent identity is required.": return "此操作需要智能体身份。";
             case "Local Host required.": return "服务只允许本机访问。";
             case "Cross-origin requests are not allowed.": return "服务拒绝了跨来源请求。";
@@ -809,7 +1201,7 @@ internal sealed class ChatForm : Form
         {
             case "pending": return "待审批";
             case "active": return "已批准";
-            case "paused": return "已暂停";
+            case "paused": return "已禁言";
             case "revoked": return "已撤销";
             default: return status;
         }
@@ -869,6 +1261,7 @@ internal sealed class ChatForm : Form
         if (disposing)
         {
             stopping = true;
+            if (memberWheelFilter != null) Application.RemoveMessageFilter(memberWheelFilter);
             poll.Dispose();
             closing.Cancel();
             client.Dispose();
@@ -877,7 +1270,7 @@ internal sealed class ChatForm : Form
         base.Dispose(disposing);
     }
 
-    private sealed class AgentData { public string Id, Name, Status; }
+    private sealed class AgentData { public string Id, Name, Status, Model; }
     private sealed class ConversationDraft { public string Text, RecipientId; }
     private sealed class Recipient
     {
@@ -885,6 +1278,196 @@ internal sealed class ChatForm : Form
         public readonly bool Available;
         public Recipient(string id, string label, bool available) { Id = id; Label = label; Available = available; }
         public override string ToString() { return Label; }
+    }
+
+    // One member card with immediate approve/mute/revoke actions; revoked members never reach this control.
+    private sealed class MemberRow : Panel
+    {
+        public readonly string AgentId;
+        public Action<string> Perform;
+        private readonly Label memberName;
+        private readonly Label modelName;
+        private readonly PillLabel badge;
+        private readonly FlowLayoutPanel actions;
+        private string status;
+
+        public MemberRow(string agentId)
+        {
+            AgentId = agentId;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            BackColor = Color.White;
+            Margin = Padding.Empty;
+            Height = Dpi(84);
+            memberName = new Label { AutoEllipsis = true, UseMnemonic = false, BackColor = Color.White, ForeColor = Color.FromArgb(27, 43, 62), Font = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft };
+            modelName = new Label { AutoEllipsis = true, UseMnemonic = false, BackColor = Color.White, ForeColor = Color.FromArgb(118, 133, 148), Font = new Font("Microsoft YaHei UI", 8F), TextAlign = ContentAlignment.MiddleLeft };
+            badge = new PillLabel();
+            actions = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, BackColor = Color.White, Margin = Padding.Empty, Padding = Padding.Empty };
+            Controls.Add(memberName);
+            Controls.Add(modelName);
+            Controls.Add(badge);
+            Controls.Add(actions);
+        }
+
+        public void UpdateMember(string name, string agentStatus, string model, bool enabled)
+        {
+            memberName.Text = name;
+            memberName.AccessibleName = name;
+            modelName.Text = "模型 · " + (String.IsNullOrWhiteSpace(model) ? "未声明" : model);
+            modelName.AccessibleName = modelName.Text;
+            AccessibleName = name + " · " + StatusText(agentStatus) + " · " + modelName.Text;
+            badge.SetStatus(agentStatus);
+            if (status != agentStatus)
+            {
+                status = agentStatus;
+                actions.Controls.Clear();
+                if (agentStatus == "pending")
+                {
+                    AddAction("批准", "active", true, false);
+                    AddAction("撤销", "revoked", false, true);
+                }
+                else if (agentStatus == "active")
+                {
+                    AddAction("禁言", "paused", false, false);
+                    AddAction("撤销", "revoked", false, true);
+                }
+                else if (agentStatus == "paused")
+                {
+                    AddAction("解禁", "active", true, false);
+                    AddAction("撤销", "revoked", false, true);
+                }
+            }
+            SetEnabled(enabled);
+            PerformLayout();
+        }
+
+        public void SetEnabled(bool enabled)
+        {
+            foreach (Control control in actions.Controls) control.Enabled = enabled;
+        }
+
+        private void AddAction(string text, string next, bool primary, bool danger)
+        {
+            var button = new ModernButton(primary, true, danger);
+            var font = new Font("Microsoft YaHei UI", 9F);
+            button.Name = "AgentAction_" + next + "_" + AgentId;
+            button.Text = text;
+            button.AccessibleName = text + " " + memberName.Text;
+            button.AutoSize = false;
+            button.MinimumSize = Size.Empty;
+            button.Font = font;
+            button.Size = new Size(Math.Max(Dpi(52), TextRenderer.MeasureText(text, font).Width + Dpi(20)), Dpi(28));
+            button.Margin = new Padding(Dpi(8), 0, 0, 0);
+            button.Cursor = Cursors.Hand;
+            button.Click += delegate { Action<string> perform = Perform; if (perform != null) perform(next); };
+            actions.Controls.Add(button);
+        }
+
+        private static string StatusText(string value)
+        {
+            switch (value)
+            {
+                case "pending": return "待审批";
+                case "active": return "已批准";
+                case "paused": return "已禁言";
+                default: return value;
+            }
+        }
+
+        private int Dpi(int value)
+        {
+            return (int)Math.Round(value * DeviceDpi / 96.0);
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            if (actions == null || memberName == null || badge == null || modelName == null) return;
+            int pad = Dpi(12);
+            Size actionSize = actions.GetPreferredSize(Size.Empty);
+            int actionWidth = Math.Min(actionSize.Width, Math.Max(0, Width - Dpi(88)));
+            actions.SetBounds(Width - pad - actionWidth, Dpi(28), actionWidth, actionSize.Height);
+            memberName.SetBounds(pad, Dpi(6), Math.Max(Dpi(40), Width - pad * 2), Dpi(22));
+            badge.SetBounds(pad, Dpi(31), badge.Width, badge.Height);
+            modelName.SetBounds(pad, Dpi(60), Math.Max(Dpi(40), Width - pad * 2), Dpi(18));
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            if (Width < 4 || Height < 4) return;
+            e.Graphics.Clear(Parent == null ? Color.White : Parent.BackColor);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath path = RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), Dpi(12)))
+            using (var brush = new SolidBrush(Color.White))
+            using (var pen = new Pen(Color.FromArgb(226, 235, 242)))
+            {
+                e.Graphics.FillPath(brush, path);
+                e.Graphics.DrawPath(pen, path);
+            }
+        }
+    }
+
+    private sealed class PillLabel : Label
+    {
+        private Color fill = Color.FromArgb(238, 242, 246);
+        private Color textColor = Color.FromArgb(90, 105, 120);
+
+        public PillLabel()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            AutoSize = false;
+            BackColor = Color.White;
+            Font = new Font("Microsoft YaHei UI", 8F);
+            Height = Dpi(20);
+            Width = Dpi(48);
+        }
+
+        public void SetStatus(string status)
+        {
+            switch (status)
+            {
+                case "pending":
+                    Text = "待审批";
+                    fill = Color.FromArgb(232, 240, 252);
+                    textColor = Color.FromArgb(37, 99, 168);
+                    break;
+                case "active":
+                    Text = "已批准";
+                    fill = Color.FromArgb(227, 245, 238);
+                    textColor = Color.FromArgb(11, 107, 95);
+                    break;
+                case "paused":
+                    Text = "已禁言";
+                    fill = Color.FromArgb(255, 243, 224);
+                    textColor = Color.FromArgb(154, 82, 0);
+                    break;
+                default:
+                    Text = status;
+                    fill = Color.FromArgb(238, 242, 246);
+                    textColor = Color.FromArgb(90, 105, 120);
+                    break;
+            }
+            Width = TextRenderer.MeasureText(Text, Font, Size.Empty, TextFormatFlags.NoPadding).Width + Dpi(16);
+            Height = Dpi(20);
+            Invalidate();
+        }
+
+        private int Dpi(int value)
+        {
+            return (int)Math.Round(value * DeviceDpi / 96.0);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Parent == null ? Color.White : Parent.BackColor);
+            if (Width < 3 || Height < 3) return;
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath path = RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), Height - 1))
+            using (var brush = new SolidBrush(fill))
+            {
+                e.Graphics.FillPath(brush, path);
+            }
+            TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+        }
     }
 
     private static GraphicsPath RoundedPath(Rectangle bounds, int diameter)
@@ -899,14 +1482,185 @@ internal sealed class ChatForm : Form
         return path;
     }
 
-    // Retain native Button accessibility, keyboard handling and InvokePattern, but draw all states explicitly.
+    private sealed class BufferedPanel : Panel
+    {
+        public BufferedPanel() { DoubleBuffered = true; }
+    }
+
+    private sealed class MemberWheelFilter : IMessageFilter
+    {
+        private const int WM_MOUSEWHEEL = 0x020A;
+        private readonly ChatForm owner;
+
+        public MemberWheelFilter(ChatForm form) { owner = form; }
+
+        public bool PreFilterMessage(ref Message message)
+        {
+            if (message.Msg != WM_MOUSEWHEEL) return false;
+            Panel list = owner.memberList;
+            if (list == null || !list.IsHandleCreated || !list.Visible) return false;
+            if (!list.RectangleToScreen(list.ClientRectangle).Contains(Cursor.Position)) return false;
+            int delta = (short)((message.WParam.ToInt64() >> 16) & 0xFFFF);
+            owner.ScrollMembers(delta > 0 ? -owner.Scaled(64) : owner.Scaled(64));
+            return true;
+        }
+    }
+
+    // Slim, flat scrollbar that replaces the native panel scrollbar in the member list.
+    private sealed class SlimScrollBar : Control
+    {
+        private int maximum, large, value, dragOffset;
+        private bool dragging, hovered;
+        public event EventHandler ValueChanged;
+
+        public SlimScrollBar()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            BackColor = Color.FromArgb(245, 248, 251);
+            AccessibleRole = AccessibleRole.ScrollBar;
+            AccessibleName = "成员列表滚动条";
+            TabStop = false;
+            Cursor = Cursors.Hand;
+        }
+
+        public int Value { get { return value; } }
+
+        public void SetState(int contentHeight, int viewportHeight, int current)
+        {
+            maximum = Math.Max(0, contentHeight);
+            large = Math.Max(1, viewportHeight);
+            int limit = Math.Max(0, maximum - large);
+            value = Math.Min(Math.Max(0, current), limit);
+            bool needed = maximum > large + 1;
+            if (Visible != needed) Visible = needed;
+            Invalidate();
+        }
+
+        private int TrackHeight { get { return Math.Max(0, Height - Dpi(4)); } }
+
+        private int ThumbHeight
+        {
+            get
+            {
+                int track = TrackHeight;
+                if (track <= 0) return 0;
+                if (maximum <= 0) return track;
+                int height = (int)Math.Round((double)large / maximum * track);
+                return Math.Max(Math.Min(Dpi(28), track), Math.Min(track, height));
+            }
+        }
+
+        private int ThumbTop
+        {
+            get
+            {
+                int limit = maximum - large;
+                int travel = Math.Max(0, TrackHeight - ThumbHeight);
+                if (limit <= 0 || travel <= 0) return Dpi(2);
+                return Dpi(2) + (int)Math.Round((double)value / limit * travel);
+            }
+        }
+
+        private int Dpi(int amount)
+        {
+            return (int)Math.Round(amount * DeviceDpi / 96.0);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Parent == null ? Color.FromArgb(245, 248, 251) : Parent.BackColor);
+            if (Width < 4 || Height < 8) return;
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            int pad = Dpi(1);
+            var track = new Rectangle(pad, Dpi(2), Width - pad * 2, Height - Dpi(4));
+            using (GraphicsPath path = RoundedPath(track, track.Width))
+            using (var brush = new SolidBrush(Color.FromArgb(237, 243, 248)))
+            {
+                e.Graphics.FillPath(brush, path);
+            }
+            int thumbHeight = ThumbHeight;
+            if (thumbHeight <= 0) return;
+            var thumb = new Rectangle(pad, ThumbTop, Width - pad * 2, thumbHeight);
+            Color fill = dragging ? Color.FromArgb(133, 156, 175) : hovered ? Color.FromArgb(165, 185, 202) : Color.FromArgb(193, 208, 220);
+            using (GraphicsPath path = RoundedPath(thumb, thumb.Width))
+            using (var brush = new SolidBrush(fill))
+            {
+                e.Graphics.FillPath(brush, path);
+            }
+        }
+
+        private void SetValueFromThumbTop(int thumbTop)
+        {
+            int travel = TrackHeight - ThumbHeight;
+            int limit = maximum - large;
+            if (travel <= 0 || limit <= 0) return;
+            int clamped = Math.Min(Math.Max(Dpi(2), thumbTop), Dpi(2) + travel);
+            int next = (int)Math.Round((double)(clamped - Dpi(2)) / travel * limit);
+            if (next == value) return;
+            value = next;
+            EventHandler handler = ValueChanged;
+            if (handler != null) handler(this, EventArgs.Empty);
+            Invalidate();
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            int top = ThumbTop, bottom = top + ThumbHeight;
+            if (e.Y >= top && e.Y <= bottom)
+            {
+                dragging = true;
+                dragOffset = e.Y - top;
+                Capture = true;
+            }
+            else
+            {
+                SetValueFromThumbTop(e.Y - ThumbHeight / 2);
+            }
+            Invalidate();
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (dragging)
+            {
+                SetValueFromThumbTop(e.Y - dragOffset);
+                return;
+            }
+            bool inside = e.Y >= ThumbTop && e.Y <= ThumbTop + ThumbHeight;
+            if (inside != hovered) { hovered = inside; Invalidate(); }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (e.Button != MouseButtons.Left) return;
+            dragging = false;
+            Capture = false;
+            Invalidate();
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            hovered = false;
+            Invalidate();
+        }
+    }
+
+
     private sealed class ModernButton : Button
     {
-        private readonly bool primary;
+        private readonly bool primary, compact, destructive;
         private bool hovered, pressed;
-        public ModernButton(bool accent)
+        public ModernButton(bool accent) : this(accent, false, false) { }
+        public ModernButton(bool accent, bool small, bool danger)
         {
             primary = accent;
+            compact = small;
+            destructive = danger;
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             UseVisualStyleBackColor = false;
             AccessibleRole = AccessibleRole.PushButton;
@@ -921,14 +1675,24 @@ internal sealed class ChatForm : Form
             if (Width < 3 || Height < 3) return;
             e.Graphics.Clear(Parent == null ? Color.White : Parent.BackColor);
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            Color fill = primary ? Color.FromArgb(0, 139, 132) : Color.White;
+            Color fill = primary ? Color.FromArgb(13, 148, 136) : Color.White;
+            Color border = primary ? fill : Color.FromArgb(214, 226, 235);
             Color text = primary ? Color.White : Color.FromArgb(38, 61, 79);
-            if (!Enabled) { fill = primary ? Color.FromArgb(220, 232, 234) : Color.FromArgb(242, 245, 248); text = Color.FromArgb(110, 127, 143); }
-            else if (pressed) fill = primary ? Color.FromArgb(0, 111, 106) : Color.FromArgb(225, 236, 241);
-            else if (hovered) fill = primary ? Color.FromArgb(0, 154, 146) : Color.FromArgb(239, 247, 249);
-            using (GraphicsPath path = RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), 12))
+            if (destructive) { fill = Color.FromArgb(253, 241, 237); border = Color.FromArgb(240, 209, 201); text = Color.FromArgb(176, 58, 46); }
+            if (!Enabled) { fill = primary ? Color.FromArgb(220, 232, 234) : Color.FromArgb(243, 246, 248); border = fill; text = Color.FromArgb(133, 147, 160); }
+            else if (pressed)
+            {
+                fill = primary ? Color.FromArgb(10, 124, 114) : destructive ? Color.FromArgb(250, 226, 220) : Color.FromArgb(226, 238, 243);
+                border = primary ? fill : destructive ? Color.FromArgb(232, 191, 181) : Color.FromArgb(205, 220, 231);
+            }
+            else if (hovered)
+            {
+                fill = primary ? Color.FromArgb(20, 164, 150) : destructive ? Color.FromArgb(252, 234, 229) : Color.FromArgb(240, 247, 250);
+                border = primary ? fill : destructive ? Color.FromArgb(236, 199, 190) : Color.FromArgb(195, 213, 226);
+            }
+            using (GraphicsPath path = RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), compact ? 10 : 12))
             using (var brush = new SolidBrush(fill))
-            using (var pen = new Pen(primary ? fill : Color.FromArgb(220, 229, 236)))
+            using (var pen = new Pen(border))
             {
                 e.Graphics.FillPath(brush, path);
                 e.Graphics.DrawPath(pen, path);
@@ -958,8 +1722,24 @@ internal sealed class ChatForm : Form
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            if (Controls.Count == 0)
-                TextRenderer.DrawText(e.Graphics, "暂无消息\r\n发送第一条消息，开始本机协作", Font, ClientRectangle, Color.FromArgb(137, 144, 150), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
+            if (Controls.Count != 0) return;
+            int cardWidth = Math.Min(360, Math.Max(220, ClientSize.Width - 64));
+            int cardHeight = 106;
+            var card = new Rectangle((ClientSize.Width - cardWidth) / 2, (ClientSize.Height - cardHeight) / 2, cardWidth, cardHeight);
+            if (card.Width < 4) return;
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath path = RoundedPath(card, 14))
+            using (var brush = new SolidBrush(Color.White))
+            using (var pen = new Pen(Color.FromArgb(226, 235, 242)))
+            {
+                e.Graphics.FillPath(brush, path);
+                e.Graphics.DrawPath(pen, path);
+            }
+            using (var titleFont = new Font(Font.FontFamily, 10.5F, FontStyle.Bold))
+            {
+                TextRenderer.DrawText(e.Graphics, "暂无消息", titleFont, new Rectangle(card.Left, card.Top + 20, card.Width, 24), Color.FromArgb(52, 71, 91), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            }
+            TextRenderer.DrawText(e.Graphics, "发送第一条消息，开始本机协作", Font, new Rectangle(card.Left, card.Top + 54, card.Width, 28), Color.FromArgb(137, 148, 160), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
         protected override Point ScrollToControl(Control activeControl)
         {
