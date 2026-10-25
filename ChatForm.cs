@@ -482,6 +482,7 @@ internal sealed class ChatForm : Form
             if (item.Selected != (item.Name == key)) item.Selected = item.Name == key;
         ListViewItem selected = conversationList.Items[key];
         if (selected != null) selected.EnsureVisible();
+        conversationList.Invalidate();
     }
 
 
@@ -636,6 +637,8 @@ internal sealed class ChatForm : Form
             ReconcileList(conversationList, conversationRows);
             ApplyConversation(selectedId, title);
             SelectConversationRow();
+            conversationList.Invalidate();
+            conversationList.Refresh();
             registrationOpen = state.ContainsKey("registrationOpen") && Convert.ToBoolean(state["registrationOpen"], CultureInfo.InvariantCulture);
             registrationButton.Text = registrationOpen ? "关闭新成员登记" : "开启新成员登记";
             registrationButton.AccessibleName = registrationButton.Text;
@@ -976,7 +979,7 @@ internal sealed class ChatForm : Form
             if (selected != null && list.Items.ContainsKey(selected)) list.Items[selected].Selected = true;
             if (top != null && list.Items.ContainsKey(top)) list.TopItem = list.Items[top];
         }
-        finally { list.EndUpdate(); }
+        finally { list.EndUpdate(); list.Invalidate(); }
     }
 
     private void RenderRecipients()
