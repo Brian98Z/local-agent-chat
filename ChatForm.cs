@@ -226,6 +226,7 @@ internal sealed class ChatForm : Form
         conversationList.HeaderStyle = ColumnHeaderStyle.None;
         conversationList.BackColor = Color.FromArgb(250, 252, 254);
         conversationList.Columns[0].Width = 250;
+        conversationList.Columns.Add("", Scaled(26));
         conversationList.SmallImageList = new ImageList { ImageSize = new Size(1, Scaled(30)), ColorDepth = ColorDepth.Depth32Bit };
         conversationList.OwnerDraw = true;
         conversationList.DrawColumnHeader += delegate(object sender, DrawListViewColumnHeaderEventArgs args) { };
@@ -236,7 +237,7 @@ internal sealed class ChatForm : Form
         conversationList.MouseLeave += delegate { if (hoverConversationIndex != -1) { hoverConversationIndex = -1; conversationList.Invalidate(); } conversationList.Cursor = Cursors.Default; };
         conversationList.MouseUp += ConversationMouseUp;
         conversationList.KeyDown += ConversationKeyDown;
-        conversationList.Resize += delegate { conversationList.Columns[0].Width = Math.Max(80, conversationList.ClientSize.Width - ConversationGutterWidth); };
+        conversationList.Resize += delegate { conversationList.Columns[0].Width = Math.Max(80, conversationList.ClientSize.Width - Scaled(26) - SystemInformation.VerticalScrollBarWidth); };
         sidebar.Controls.Add(conversationList, 0, 2);
         memberHeading = Identify(new Label { Text = "群成员", Font = new Font(Font.FontFamily, 10.5F, FontStyle.Bold), ForeColor = ink, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, "MemberHeading", "群成员");
         sidebar.Controls.Add(memberHeading, 0, 3);
@@ -450,7 +451,11 @@ internal sealed class ChatForm : Form
                     ApplyConversation(selectedId, Value(conversation, "title"));
                     string key = selectedId.ToString(CultureInfo.InvariantCulture);
                     if (!conversationList.Items.ContainsKey(key))
-                        conversationList.Items.Insert(0, new ListViewItem(groupTitle.Text) { Name = key, ToolTipText = groupTitle.Text });
+                    {
+                        var item = new ListViewItem(groupTitle.Text) { Name = key, ToolTipText = groupTitle.Text };
+                        item.SubItems.Add("");
+                        conversationList.Items.Insert(0, item);
+                    }
                     SelectConversationRow();
                 }
                 finally { rendering = false; }
@@ -656,7 +661,7 @@ internal sealed class ChatForm : Form
             var conversationRows = new List<string[]>();
             foreach (Dictionary<string, object> row in Rows(state, "conversations"))
             {
-                conversationRows.Add(new string[] { Value(row, "id"), Value(row, "title") });
+                conversationRows.Add(new string[] { Value(row, "id"), Value(row, "title"), "" });
                 if (Number(row, "id") == selectedId) title = Value(row, "title");
             }
             if (title == null) throw new ChatClientException("当前对话不在历史列表中，请等待重新同步。");
@@ -707,8 +712,6 @@ internal sealed class ChatForm : Form
         finally { rendering = false; }
     }
 
-    private int ConversationGutterWidth { get { return Scaled(22); } }
-
     private int ConversationDeleteLeft(int index)
     {
         return conversationList.Columns[0].Width;
@@ -716,32 +719,27 @@ internal sealed class ChatForm : Form
 
     private void DrawConversationSubItem(object sender, DrawListViewSubItemEventArgs e)
     {
-        if (e.ColumnIndex != 0) return;
-        Rectangle row = e.Bounds;
-        row.Width = Math.Max(row.Width, conversationList.Columns[0].Width);
-        if (row.Width < 8) return;
+        if (e.ColumnIndex == 0)
+        {
+            e.DrawDefault = true;
+            return;
+        }
         bool selected = e.Item.Selected;
         bool hovered = e.ItemIndex == hoverConversationIndex;
-        Color back = selected ? Color.FromArgb(13, 148, 136) : hovered ? Color.FromArgb(234, 246, 244) : Color.FromArgb(250, 252, 254);
-        using (var brush = new SolidBrush(back)) e.Graphics.FillRectangle(brush, row);
-        Color fore = selected ? Color.White : ink;
-        var text = new Rectangle(row.Left + Scaled(10), row.Top, Math.Max(20, row.Width - Scaled(14)), row.Height);
-        TextRenderer.DrawText(e.Graphics, e.Item.Text, Font, text, fore, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-        int gutter = conversationList.Columns[0].Width;
-        var icon = new Rectangle(gutter + Scaled(2), row.Top + Scaled(3), Math.Max(12, conversationList.ClientSize.Width - gutter - Scaled(4)), Math.Max(12, row.Height - Scaled(6)));
         bool canDelete = conversationCount > 1 && !mutating;
+        Color back = selected ? Color.FromArgb(13, 148, 136) : hovered ? Color.FromArgb(234, 246, 244) : Color.FromArgb(250, 252, 254);
+        using (var brush = new SolidBrush(back)) e.Graphics.FillRectangle(brush, e.Bounds);
         if (hovered && hoverConversationDelete && canDelete)
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using (GraphicsPath path = RoundedPath(icon, Scaled(8)))
+            using (GraphicsPath path = RoundedPath(e.Bounds, Scaled(8)))
             using (var fill = new SolidBrush(Color.FromArgb(250, 228, 222)))
             {
                 e.Graphics.FillPath(fill, path);
             }
         }
-        Color glyph = !canDelete ? Color.FromArgb(196, 207, 216) : hovered && hoverConversationDelete ? Color.FromArgb(166, 72, 60) : Color.FromArgb(150, 162, 173);
-        var slot = new Rectangle(gutter, row.Top, Math.Max(ConversationGutterWidth, conversationList.ClientSize.Width - gutter), row.Height);
-        DrawConversationDeleteGlyph(e.Graphics, slot, glyph);
+        Color glyph = !canDelete ? Color.FromArgb(196, 207, 216) : hovered && hoverConversationDelete ? Color.FromArgb(166, 72, 60) : selected ? Color.White : Color.FromArgb(150, 162, 173);
+        DrawConversationDeleteGlyph(e.Graphics, e.Bounds, glyph);
     }
 
     // 垃圾桶图标：桶身、桶盖、提手全部用 GraphicsPath 绘制，始终居中在对话行右侧 gutter 内。

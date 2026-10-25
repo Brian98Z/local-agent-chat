@@ -111,7 +111,7 @@ D:\OMP\project\local-agent-chat\LocalAgentChat.exe --port 4322 --data-dir D:/OMP
 6. 验证切换保留各自草稿、长文本换行、向上阅读不强制滚到底部、最小窗口和实际DPI。
 7. 关闭窗口，确认 EXE/子服务退出、端口释放，再启动同目录无锁冲突。
 
-关键控件 AutomationId：`NewConversationButton`、`ConversationList`、`GroupTitle`、`MessageInput`、`SendButton`、`MessageHistory`、`RegistrationButton`、`MemberHeading`（群成员计数）、`AgentList`（成员卡片面板，非ListView）、`MemberScrollBar`、`BulkApproveButton`、`BulkRevokeButton`、`AuditToggle`、`McpDocButton`（保存 MCP.md 副本，含覆盖确认，不导出凭据）。每位成员的操作按钮名为 `AgentAction_<status>_<uuid>`（status 为 active/paused/revoked），可访问名称包含动作与成员名；禁用态仍然存在。`BulkRevokeButton` 会弹出不可恢复确认。对话删除是 `ConversationList` 每行右侧 22px gutter 内自绘的垃圾桶图标（非独立控件），也可选中对话后按 Delete；仅剩一个对话时图标禁用。
+关键控件 AutomationId：`NewConversationButton`、`ConversationList`、`GroupTitle`、`MessageInput`、`SendButton`、`MessageHistory`、`RegistrationButton`、`MemberHeading`（群成员计数）、`AgentList`（成员卡片面板，非ListView）、`MemberScrollBar`、`BulkApproveButton`、`BulkRevokeButton`、`AuditToggle`、`McpDocButton`（保存 MCP.md 副本，含覆盖确认，不导出凭据）。每位成员的操作按钮名为 `AgentAction_<status>_<uuid>`（status 为 active/paused/revoked），可访问名称包含动作与成员名；禁用态仍然存在。`BulkRevokeButton` 会弹出不可恢复确认。`ConversationList` 标题列使用系统默认绘制（避免自绘掉字），右侧独立 26px 删除列自绘垃圾桶图标；也可选中对话后按 Delete；仅剩一个对话时图标禁用。
 
 可用 PowerShell -STA UIAutomation 驱动实际窗口；成员卡片按钮是自绘 Button，可通过 `NativeWindowHandle` 发送 `BM_CLICK` 触发，不需要先前置窗口。ListView项按 SelectionItemPattern 而非只靠ControlType.ListItem，输入不支持 ValuePattern 时用 WM_SETTEXT。函数不要命名 History（被PowerShell默认别名遮蔽）。自动化脚本和截图曾为临时文件，已清理，**仓库中没有永久原生/浏览器 UI 自动化套件**；以上为可重复人工/临时自动化验收步骤。
 
@@ -127,7 +127,7 @@ node D:/OMP/project/local-agent-chat/server.mjs --port 4323 --data-dir D:/OMP/te
 
 2026-10-25 UI/权限迭代中已观察到：
 - `chat.test.mjs` 五组回归全部通过：准入/消息/任务生命周期；多对话/事件/重连；删除对话及消息/任务清理；批量批准/撤销权限与任务释放；旧库迁移幂等。本轮新增禁言读权限、写拒绝、自动标题、模型声明必填/固定、MCP 未配置模型拒绝、CLI `chat_status` 与 `--text-file` 断言。
-- 原生UI在临时库实测：群成员标题显示未撤销计数；成员卡片一键批准、一键撤销直接生效；撤销后成员从列表消失；成员描述固定显示模型标识；禁言/解禁文案、状态徽标、自绘细滚动条与成员卡片布局正常；滚轮滑动无残影；全部批准/全部撤销入口可见；对话行右侧空白 gutter 的矢量垃圾桶图标正常显示，选中对话按 Delete 确认后消息/任务清理、自动切到剩余对话且无刷新异常；切换/新建对话显示加载遮罩；历史列表改为 DrawSubItem 绘制，首次显示不空白；自动标题从首条人工消息生成。
+- 原生UI在临时库实测：群成员标题显示未撤销计数；成员卡片一键批准、一键撤销直接生效；撤销后成员从列表消失；成员描述固定显示模型标识；禁言/解禁文案、状态徽标、自绘细滚动条与成员卡片布局正常；滚轮滑动无残影；全部批准/全部撤销入口可见；对话标题列改用系统默认绘制、删除列单独自绘垃圾桶，首次显示不空白；选中对话按 Delete 确认后消息/任务清理、自动切到剩余对话且无刷新异常；切换/新建对话显示加载遮罩；自动标题从首条人工消息生成。
 - 浏览器实测登录后成员数不含 revoked，成员卡片显示模型描述，`解禁` 文案正确；一键批准与一键撤销生效，撤销成员立即从列表移除；全部批准按钮生效并变灰；切换对话显示加载遮罩；自动标题显示在对话下拉框与标题区。
 - 早前实测的新建、隔离、历史切换及两次重启恢复仍有效；本轮未逐一重跑关窗释放端口等无关路径。
 - 本轮验证使用了 DPI 感知截图与临时 UIAutomation/BM_CLICK 脚本；脚本与截图已清理。
