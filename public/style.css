@@ -105,6 +105,9 @@ h3 { font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
 .conversation-toolbar .hint { grid-column: 1 / -1; }
 .conversation-toolbar select { text-overflow: ellipsis; }
 .message-scroll { height: 386px; overflow: auto; overscroll-behavior: contain; padding: 0 5px 16px 0; }
+.message-stage { position: relative; }
+.chat-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px; background: #f3f5f1; color: var(--muted); font-size: 13px; font-weight: 600; text-align: center; white-space: pre-line; z-index: 2; }
+.chat-loading[hidden] { display: none; }
 .message-list { display: flex; flex-direction: column; gap: 12px; }
 .message { border: 1px solid #e8ede6; border-radius: 9px; padding: 12px 14px; background: #fafbf9; }
 .message.from-admin { background: #f1f7ef; border-color: #deead9; }

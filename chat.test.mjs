@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve, join } from 'node:path';
 import { once } from 'node:events';
@@ -153,6 +153,9 @@ test('real HTTP and MCP lifecycle: approval, private visibility, ownership, revo
   assert.equal(joinResult.result.isError, undefined);
   const mid = JSON.parse(joinResult.result.content[0].text).agent.id;
   assert.equal(JSON.parse(joinResult.result.content[0].text).agent.model, 'test-model');
+  const pendingStatus = JSON.parse((await mcp.call('chat_status')).result.content[0].text);
+  assert.equal(pendingStatus.status, 'pending');
+  assert.equal(pendingStatus.model, 'test-model');
   const pendingReady = JSON.parse((await mcp.call('chat_ready')).result.content[0].text);
   assert.equal(pendingReady.ready, false);
   assert.equal(pendingReady.readable, false);
@@ -170,6 +173,14 @@ test('real HTTP and MCP lifecycle: approval, private visibility, ownership, revo
   assert.ok(Array.isArray(activeReady.conversations));
   assert.equal((await mcp.call('chat_send', { text: 'from MCP', to: aid })).result.isError, undefined);
   assert.equal((await a('/api/messages')).messages.at(-1).text, 'from MCP');
+  const cliStatus = spawnSync(process.execPath, [join(root, 'mcp.mjs'), '--name', 'MCP Worker', '--model', 'test-model', '--identity', identity, '--url', server.url, '--call', 'chat_status'], { encoding: 'utf8' });
+  assert.equal(cliStatus.status, 0, cliStatus.stderr);
+  assert.equal(JSON.parse(cliStatus.stdout).status, 'active');
+  const replyFile = join(dir, 'cli-reply.txt');
+  await writeFile(replyFile, 'CLI text file reply', 'utf8');
+  const sendFile = spawnSync(process.execPath, [join(root, 'mcp.mjs'), '--name', 'MCP Worker', '--model', 'test-model', '--identity', identity, '--url', server.url, '--call', 'chat_send', '--args', JSON.stringify({ conversationId: activeReady.activeConversationId }), '--text-file', replyFile], { encoding: 'utf8' });
+  assert.equal(sendFile.status, 0, sendFile.stderr);
+  assert.equal(JSON.parse(sendFile.stdout).message.text, 'CLI text file reply');
   assert.equal((await mcp.call('chat_send', { text: 'bad', injected: true })).result.isError, true);
   const mtask = JSON.parse((await mcp.call('task_create', { title: 'MCP task' })).result.content[0].text).task;
   await mcp.call('task_claim', { id: mtask.id });

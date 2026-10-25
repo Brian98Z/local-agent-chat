@@ -93,8 +93,16 @@ function actionButton(label, operation, handler, destructive = false) {
   button.addEventListener('click', handler);
   return button;
 }
+function setChatLoading(loading, title) {
+  const overlay = $('chat-loading');
+  if (!overlay) return;
+  overlay.hidden = !loading;
+  overlay.textContent = loading ? `正在加载对话…${title ? `\n${title}` : ''}` : '';
+  $('message-scroll').setAttribute('aria-busy', String(Boolean(loading)));
+}
 function switchConversation(id) {
   if (activeConversationId === id) return;
+  setChatLoading(true, state?.conversations.find((conversation) => conversation.id === id)?.title ?? '正在连接');
   if (activeConversationId !== null) {
     conversationDrafts.set(activeConversationId, {
       text: $('message-text').value,
@@ -317,6 +325,7 @@ function scheduleSync() {
   if (token) timer = setTimeout(() => { void sync(); }, 2000);
 }
 function handleFailure(error) {
+  setChatLoading(false);
   if (error.name === 'AbortError') return;
   if (error.status === 401 || error.status === 403) {
     disconnect();
@@ -349,6 +358,7 @@ async function sync() {
         if (batch.messages.length < 200) break;
       }
       ready = true;
+      setChatLoading(false);
       connectionStatus('已连接 · 每 2 秒同步', 'online');
       setText($('last-sync'), `最近同步 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`);
       showError(operationError);
@@ -399,6 +409,7 @@ async function mutate(path, body, success, onSuccess) {
 }
 function disconnect() {
   generation += 1;
+  setChatLoading(false);
   clearTimeout(timer);
   controller?.abort();
   controller = null;
@@ -452,6 +463,7 @@ $('connection-form').addEventListener('submit', (event) => {
 });
 $('disconnect-button').addEventListener('click', disconnect);
 $('new-conversation-button').addEventListener('click', () => {
+  setChatLoading(true, '新建对话');
   void mutate('/api/admin/conversations', {}, '已新建对话，历史内容已保留。', acceptConversation);
 });
 $('delete-conversation-button').addEventListener('click', () => {
@@ -466,8 +478,10 @@ $('delete-conversation-button').addEventListener('click', () => {
 });
 $('conversation-select').addEventListener('change', () => {
   const id = Number($('conversation-select').value);
+  const title = $('conversation-select').selectedOptions[0]?.textContent;
   $('conversation-select').value = String(activeConversationId);
   if (!Number.isSafeInteger(id) || id <= 0 || id === activeConversationId) return;
+  setChatLoading(true, title);
   void mutate(`/api/admin/conversations/${id}/activate`, {}, '已切换对话。', acceptConversation);
 });
 $('registration-button').addEventListener('click', () => {

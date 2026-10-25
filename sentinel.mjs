@@ -38,7 +38,7 @@ const statePath = resolve(config.state || join(projectDir, 'data', 'sentinel-sta
 const logDir = resolve(config.logDir || join(projectDir, 'data', 'sentinel-logs'));
 const baseUrl = config.url || 'http://127.0.0.1:4317';
 const conversationFilter = options['--conversation'] === undefined ? null : Number(options['--conversation']);
-const interval = Number(options['--interval'] ?? 15000);
+const interval = Number(options['--interval'] ?? 5000);
 const once = options['--once'] === true;
 const dryRun = options['--dry-run'] === true;
 const agentsConfig = config.agents && typeof config.agents === 'object' ? config.agents : {};
@@ -214,7 +214,7 @@ async function generateReply(agent, prompt, execModel) {
 async function saveState() {
   if (dryRun) return;
   const temporary = statePath + '.tmp';
-  await writeFile(temporary, JSON.stringify({ lastProcessed, updatedAt: new Date().toISOString() }, null, 2) + '\n', 'utf8');
+  await writeFile(temporary, JSON.stringify({ lastProcessed, lastPollAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, null, 2) + '\n', 'utf8');
   await rename(temporary, statePath);
 }
 
@@ -297,6 +297,7 @@ async function check() {
     const rows = conversationFilter === null ? messagesQuery.all(lastProcessed) : messagesQuery.all(lastProcessed, conversationFilter);
     if (!rows.length) {
       if (once) log('没有新的 admin 消息');
+      await saveState();
       return;
     }
     for (const message of rows) {
@@ -322,7 +323,17 @@ function stop() {
 
 process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
+process.once('exit', (code) => log('哨兵退出 code=' + code));
+process.once('uncaughtException', (error) => {
+  log('哨兵未捕获异常：' + (error && error.stack ? error.stack : error));
+  process.exit(2);
+});
+process.once('unhandledRejection', (error) => {
+  log('哨兵未处理拒绝：' + (error && error.stack ? error.stack : error));
+  process.exit(2);
+});
 await mkdir(logDir, { recursive: true });
+await saveState();
 log(`哨兵启动：db=${dbPath} after=${lastProcessed} interval=${interval}ms dryRun=${dryRun} once=${once}`);
 await check();
 if (once) {

@@ -42,6 +42,8 @@ internal sealed class ChatForm : Form
     private bool layingOutMembers;
     private int hoverConversationIndex = -1;
     private bool hoverConversationDelete, suppressConversationSelection;
+    private Panel loadingOverlay;
+    private Label loadingLabel;
     private bool registrationOpen, connected, syncing, mutating, stopping, rendering;
     private long cursor, activeConversationId;
     private int messageCount, conversationCount;
@@ -227,8 +229,8 @@ internal sealed class ChatForm : Form
         conversationList.SmallImageList = new ImageList { ImageSize = new Size(1, Scaled(30)), ColorDepth = ColorDepth.Depth32Bit };
         conversationList.OwnerDraw = true;
         conversationList.DrawColumnHeader += delegate(object sender, DrawListViewColumnHeaderEventArgs args) { };
-        conversationList.DrawItem += DrawConversationItem;
-        conversationList.DrawSubItem += delegate(object sender, DrawListViewSubItemEventArgs args) { };
+        conversationList.DrawItem += delegate(object sender, DrawListViewItemEventArgs args) { args.DrawDefault = false; };
+        conversationList.DrawSubItem += DrawConversationSubItem;
         conversationList.MouseDown += ConversationMouseDown;
         conversationList.MouseMove += ConversationMouseMove;
         conversationList.MouseLeave += delegate { if (hoverConversationIndex != -1) { hoverConversationIndex = -1; conversationList.Invalidate(); } conversationList.Cursor = Cursors.Default; };
@@ -279,9 +281,16 @@ internal sealed class ChatForm : Form
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = Padding.Empty };
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 210));
+        var historyHost = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Color.FromArgb(240, 244, 248) };
         messageHistory = Identify(new HistoryPanel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(240, 244, 248), AutoScroll = true, Margin = Padding.Empty }, "MessageHistory", "尚无消息，发送第一条消息开始协作。");
         messageHistory.Resize += delegate { LayoutMessages(false); };
-        layout.Controls.Add(messageHistory, 0, 0);
+        loadingOverlay = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(240, 244, 248), Visible = false };
+        loadingLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = muted, Font = new Font(Font.FontFamily, 11F, FontStyle.Bold), Text = "正在加载对话…" };
+        loadingOverlay.Controls.Add(loadingLabel);
+        historyHost.Controls.Add(messageHistory);
+        historyHost.Controls.Add(loadingOverlay);
+        loadingOverlay.BringToFront();
+        layout.Controls.Add(historyHost, 0, 0);
         var compose = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(24, 12, 24, 12), BackColor = Color.White, Margin = Padding.Empty };
         compose.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         compose.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
@@ -340,7 +349,8 @@ internal sealed class ChatForm : Form
             Size = new Size(Math.Min(Width, area.Width), Math.Min(Height, area.Height));
             Location = new Point(area.Left + (area.Width - Width) / 2, area.Top + (area.Height - Height) / 2);
             poll.Start();
-            await RefreshAsync();
+            SetConversationLoading(true, "正在连接");
+            try { await RefreshAsync(); } finally { SetConversationLoading(false, null); }
         };
         poll.Tick += async delegate { await RefreshAsync(); };
         newConversationButton.Click += async delegate { await ChangeConversationAsync(0); };
@@ -424,23 +434,41 @@ internal sealed class ChatForm : Form
 
     private async Task ChangeConversationAsync(long id)
     {
-        string path = id == 0 ? "api/admin/conversations" : "api/admin/conversations/" + id.ToString(CultureInfo.InvariantCulture) + "/activate";
-        await MutateAsync(path, new Dictionary<string, object>(), id == 0 ? "已新建对话。" : "已切换对话。", delegate(Dictionary<string, object> result)
+        string title = conversationList.SelectedItems.Count > 0 ? conversationList.SelectedItems[0].Text : (id == 0 ? "新建对话" : null);
+        SetConversationLoading(true, title);
+        try
         {
-            var conversation = result["conversation"] as Dictionary<string, object>;
-            if (conversation == null) throw new ChatClientException("服务返回的对话信息无效。");
-            rendering = true;
-            try
+            string path = id == 0 ? "api/admin/conversations" : "api/admin/conversations/" + id.ToString(CultureInfo.InvariantCulture) + "/activate";
+            await MutateAsync(path, new Dictionary<string, object>(), id == 0 ? "已新建对话。" : "已切换对话。", delegate(Dictionary<string, object> result)
             {
-                long selectedId = Number(result, "activeConversationId");
-                ApplyConversation(selectedId, Value(conversation, "title"));
-                string key = selectedId.ToString(CultureInfo.InvariantCulture);
-                if (!conversationList.Items.ContainsKey(key))
-                    conversationList.Items.Insert(0, new ListViewItem(groupTitle.Text) { Name = key, ToolTipText = groupTitle.Text });
-                SelectConversationRow();
-            }
-            finally { rendering = false; }
-        });
+                var conversation = result["conversation"] as Dictionary<string, object>;
+                if (conversation == null) throw new ChatClientException("服务返回的对话信息无效。");
+                rendering = true;
+                try
+                {
+                    long selectedId = Number(result, "activeConversationId");
+                    ApplyConversation(selectedId, Value(conversation, "title"));
+                    string key = selectedId.ToString(CultureInfo.InvariantCulture);
+                    if (!conversationList.Items.ContainsKey(key))
+                        conversationList.Items.Insert(0, new ListViewItem(groupTitle.Text) { Name = key, ToolTipText = groupTitle.Text });
+                    SelectConversationRow();
+                }
+                finally { rendering = false; }
+            });
+        }
+        finally { SetConversationLoading(false, null); }
+    }
+
+    private void SetConversationLoading(bool loading, string title)
+    {
+        if (loadingOverlay == null || loadingLabel == null) return;
+        string text = "正在加载对话…";
+        if (loading && !String.IsNullOrWhiteSpace(title)) text += "\r\n" + title;
+        loadingLabel.Text = text;
+        loadingLabel.AccessibleName = text;
+        loadingOverlay.Visible = loading;
+        if (messageHistory != null) messageHistory.Enabled = !loading;
+        if (loading) loadingOverlay.BringToFront();
     }
 
     private void ApplyConversation(long id, string title)
@@ -448,6 +476,7 @@ internal sealed class ChatForm : Form
         if (id <= 0) throw new ChatClientException("服务返回的当前对话标识无效。");
         if (activeConversationId != id)
         {
+            SetConversationLoading(true, title);
             Recipient recipient = recipientBox.SelectedItem as Recipient;
             if (activeConversationId > 0)
                 drafts[activeConversationId] = new ConversationDraft { Text = messageInput.Text, RecipientId = recipient == null ? null : recipient.Id };
@@ -545,7 +574,7 @@ internal sealed class ChatForm : Form
         {
             if (entered) requestGate.Release();
             syncing = false;
-            if (!stopping) UpdateButtons();
+            if (!stopping) { SetConversationLoading(false, null); UpdateButtons(); }
         }
     }
 
@@ -613,6 +642,7 @@ internal sealed class ChatForm : Form
         } while (true);
         connected = true;
         SetStatus("已连接 · " + messageCount + " 条消息 · " + DateTime.Now.ToString("T", CultureInfo.CurrentUICulture), false);
+        SetConversationLoading(false, null);
         UpdateButtons();
     }
 
@@ -684,8 +714,9 @@ internal sealed class ChatForm : Form
         return conversationList.Columns[0].Width;
     }
 
-    private void DrawConversationItem(object sender, DrawListViewItemEventArgs e)
+    private void DrawConversationSubItem(object sender, DrawListViewSubItemEventArgs e)
     {
+        if (e.ColumnIndex != 0) return;
         Rectangle row = e.Bounds;
         row.Width = Math.Max(row.Width, conversationList.Columns[0].Width);
         if (row.Width < 8) return;

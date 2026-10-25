@@ -125,6 +125,7 @@ async function main() {
           heartbeat,
         };
       }
+      case 'chat_status': return (await request('/api/me')).agent;
       case 'chat_agents': return request('/api/agents');
       case 'chat_conversations': return request('/api/conversations');
       case 'chat_read': return request(`/api/messages?after=${args.after ?? 0}&limit=${args.limit ?? 100}${args.conversationId === undefined ? '' : `&conversationId=${args.conversationId}`}`);

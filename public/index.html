@@ -48,7 +48,10 @@
           <button id="delete-conversation-button" class="secondary compact danger" type="button" disabled>删除对话</button>
           <p class="hint">默认继续上次对话。切换对话会同步到所有客户端，不影响历史内容与成员审批。</p>
         </div>
-        <div id="message-scroll" class="message-scroll" tabindex="0" aria-label="消息历史"><p id="messages-empty" class="empty">连接后加载完整消息历史。</p><ol id="message-list" class="message-list" aria-label="全部消息"></ol></div>
+        <div class="message-stage">
+          <div id="message-scroll" class="message-scroll" tabindex="0" aria-label="消息历史"><p id="messages-empty" class="empty">连接后加载完整消息历史。</p><ol id="message-list" class="message-list" aria-label="全部消息"></ol></div>
+          <div id="chat-loading" class="chat-loading" hidden>正在加载对话…</div>
+        </div>
         <form id="message-form" class="compose-form">
           <div class="field"><label for="message-recipient">发送给</label><select id="message-recipient" disabled><option value="">所有成员 · 广播</option></select></div>
           <div class="field"><label for="message-text">消息内容</label><textarea id="message-text" rows="3" maxlength="8000" required placeholder="以管理员身份发送消息…" disabled></textarea></div>
