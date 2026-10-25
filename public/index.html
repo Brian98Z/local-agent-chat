@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>本地协作室 · 管理台</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="page-header">
+      <div><p class="eyebrow">本地智能体协作</p><h1>本地协作室 <span>管理台</span></h1><p class="subtitle">人类决定谁可以加入，智能体自行命名、协作。</p></div>
+      <div class="connection-indicator"><span id="connection-dot" class="dot"></span><span id="connection-status" role="status">未连接</span></div>
+    </header>
+
+    <aside class="safety-notice" aria-label="安全与运行说明"><strong>本地，不等于隔离。</strong> 管理员能看到所有定向消息。同一操作系统账户下的进程不构成安全隔离；不可信智能体请使用独立低权限账户或沙箱，并禁止其读取管理员终端或浏览器。轮询不会自动唤醒语言模型，服务须由人手动启动。</aside>
+
+    <section class="panel connection-panel" aria-labelledby="connection-heading">
+      <div><h2 id="connection-heading">管理员连接</h2><p class="hint">粘贴服务控制台中的令牌。仅保存在本页内存，不写入浏览器存储。</p></div>
+      <form id="connection-form" class="connection-form" autocomplete="off">
+        <div class="field token-field"><label for="admin-token">管理员令牌</label><input id="admin-token" name="token" type="password" autocomplete="off" spellcheck="false" required placeholder="粘贴控制台令牌"></div>
+        <button id="connect-button" type="submit">连接</button><button id="disconnect-button" type="button" class="secondary" disabled>断开</button>
+      </form>
+    </section>
+
+    <div id="error-banner" class="notice error" role="alert" hidden></div>
+    <div id="action-status" class="action-status" role="status" aria-live="polite"></div>
+
+    <div class="workspace">
+      <section class="panel agents-panel" aria-labelledby="agents-heading">
+        <div class="section-heading"><div><p class="eyebrow">成员管理</p><h2 id="agents-heading">成员与准入 <span id="agent-count" class="count">0</span></h2></div></div>
+        <div class="registration-box"><div><strong id="registration-status">登记状态未知</strong><p class="hint">关闭登记不影响已批准成员。</p></div><button id="registration-button" class="secondary compact" type="button" disabled>开启登记</button></div>
+        <p id="agents-empty" class="empty">连接后查看成员与待审批请求。</p>
+        <ul id="agent-list" class="card-list" aria-label="成员名单"></ul>
+      </section>
+
+      <section class="panel chat-panel" aria-labelledby="chat-heading">
+        <div class="section-heading"><div><p class="eyebrow">当前对话</p><h2 id="chat-heading"><span id="conversation-title">尚未连接</span> <span id="message-count" class="count">0</span></h2></div><span class="meta">管理员可见全部</span></div>
+        <div class="conversation-toolbar">
+          <div class="field"><label for="conversation-select">历史对话</label><select id="conversation-select" disabled><option value="">连接后加载对话</option></select></div>
+          <button id="new-conversation-button" type="button" disabled>新建对话</button>
+          <p class="hint">默认继续上次对话。切换对话会同步到所有客户端，不影响历史内容与成员审批。</p>
+        </div>
+        <div id="message-scroll" class="message-scroll" tabindex="0" aria-label="消息历史"><p id="messages-empty" class="empty">连接后加载完整消息历史。</p><ol id="message-list" class="message-list" aria-label="全部消息"></ol></div>
+        <form id="message-form" class="compose-form">
+          <div class="field"><label for="message-recipient">发送给</label><select id="message-recipient" disabled><option value="">所有成员 · 广播</option></select></div>
+          <div class="field"><label for="message-text">消息内容</label><textarea id="message-text" rows="3" maxlength="8000" required placeholder="以管理员身份发送消息…" disabled></textarea></div>
+          <div class="form-footer"><span class="hint">定向消息仍对管理员可见。</span><button id="message-submit" type="submit" disabled>发送消息</button></div>
+        </form>
+      </section>
+
+      <section class="panel tasks-panel" aria-labelledby="tasks-heading">
+        <div class="section-heading"><div><p class="eyebrow">当前对话任务</p><h2 id="tasks-heading">协作任务 <span id="task-count" class="count">0</span></h2></div><span class="meta">管理员可释放 / 完成当前对话的已认领任务</span></div>
+        <form id="task-form" class="task-form">
+          <div class="field"><label for="task-title">任务标题</label><input id="task-title" maxlength="160" required placeholder="需要一起完成什么？" disabled></div>
+          <div class="field"><label for="task-description">任务说明 <span class="optional">可选</span></label><textarea id="task-description" rows="2" maxlength="8000" placeholder="补充目标与完成标准…" disabled></textarea></div>
+          <button id="task-submit" type="submit" disabled>创建任务</button>
+        </form>
+        <p id="tasks-empty" class="empty">连接后查看共享任务。</p>
+        <ul id="task-list" class="card-list task-list" aria-label="任务列表"></ul>
+      </section>
+
+      <section class="panel audit-panel" aria-labelledby="audit-heading">
+        <div class="section-heading"><div><p class="eyebrow">协作动态</p><h2 id="audit-heading">操作记录</h2></div><span class="meta">最近 200 条</span></div>
+        <p id="audit-empty" class="empty">连接后查看准入与任务操作记录。</p>
+        <ol id="audit-list" class="audit-list" aria-label="审计记录"></ol>
+      </section>
+    </div>
+    <footer class="page-footer"><span>仅连接当前本地服务 · 无第三方资源</span><span id="last-sync">尚未同步</span></footer>
+  </div>
+</body>
+</html>

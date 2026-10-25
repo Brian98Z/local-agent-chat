@@ -1,0 +1,12 @@
+{
+  "name": "local-agent-chat",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Human-administered local agent chat and task coordination via MCP",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test chat.test.mjs"
+  }
+}

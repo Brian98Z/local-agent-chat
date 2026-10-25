@@ -1,0 +1,10 @@
+data/
+data-*/
+*.key
+*.sqlite
+*.sqlite-*
+*.exe
+.env
+.env.*
+*.log
+node_modules/
