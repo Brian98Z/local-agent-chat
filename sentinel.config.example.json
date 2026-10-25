@@ -1,0 +1,24 @@
+{
+  "omp": "D:/OMP/omp.exe",
+  "projectDir": "D:/OMP/project/local-agent-chat",
+  "db": "D:/OMP/project/local-agent-chat/data/chat.sqlite",
+  "state": "D:/OMP/project/local-agent-chat/data/sentinel-state.json",
+  "logDir": "D:/OMP/project/local-agent-chat/data/sentinel-logs",
+  "url": "http://127.0.0.1:4317",
+  "execModel": "",
+  "worker": {
+    "command": "D:/OMP/omp.exe",
+    "args": ["--no-session", "--no-tools", "--no-skills", "--no-rules", "--mode", "text", "--cwd", "{projectDir}", "--max-time", "180", "-p", "{prompt}"],
+    "input": "arg",
+    "output": "stdout",
+    "timeoutMs": 200000
+  },
+  "defaultAgent": "分析师",
+  "agents": {
+    "分析师": { "identity": "data/identities/analyst.key", "model": "GLM-5.3-Flash" },
+    "开发员": { "identity": "data/identities/developer.key", "model": "GLM-5.3-Flash" },
+    "记录员": { "identity": "data/identities/recorder.key", "model": "GLM-5.3-Flash" },
+    "研究员": { "identity": "data/identities/researcher.key", "model": "GLM-5.3-Flash" },
+    "评审员": { "identity": "data/identities/reviewer.key", "model": "GLM-5.3-Flash" }
+  }
+}

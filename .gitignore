@@ -8,3 +8,4 @@ data-*/
 .env.*
 *.log
 node_modules/
+sentinel.config.json

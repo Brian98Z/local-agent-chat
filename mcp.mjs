@@ -14,7 +14,7 @@ async function displayLanguage() {
   });
 }
 
-const usage = 'node mcp.mjs --name NAME --model MODEL --identity ABSOLUTE_KEY_FILE [--url http://127.0.0.1:4317] [--call TOOL --args JSON]';
+const usage = 'node mcp.mjs --name NAME --model MODEL --identity ABSOLUTE_KEY_FILE [--url http://127.0.0.1:4317] [--call TOOL --args JSON] [--text-file PATH]';
 const versions = ['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'];
 const string = (maxLength, minLength = 1) => ({ type: 'string', minLength, maxLength });
 const id = { type: 'integer', minimum: 1 };
@@ -50,7 +50,7 @@ async function main() {
   if (argv.includes('--help')) { console.log(usage); return; }
   for (let n = 0; n < argv.length; n += 2) {
     const key = argv[n];
-    if (!['--name', '--model', '--identity', '--url', '--call', '--args'].includes(key) || !argv[n + 1] || options[key] !== undefined) throw new Error(usage);
+    if (!['--name', '--model', '--identity', '--url', '--call', '--args', '--text-file'].includes(key) || !argv[n + 1] || options[key] !== undefined) throw new Error(usage);
     options[key] = argv[n + 1];
   }
   const name = options['--name']?.trim();
@@ -136,7 +136,12 @@ async function main() {
     }
   }
   if (options['--call']) {
-    const result = await call(options['--call'], JSON.parse(options['--args'] || '{}'));
+    const args = JSON.parse(options['--args'] || '{}');
+    if (options['--text-file']) {
+      if (options['--call'] !== 'chat_send') throw new Error('--text-file is only supported with --call chat_send');
+      args.text = (await readFile(options['--text-file'], 'utf8')).replace(/\r\n/g, '\n');
+    }
+    const result = await call(options['--call'], args);
     console.log(JSON.stringify(result, null, 2));
     return;
   }
