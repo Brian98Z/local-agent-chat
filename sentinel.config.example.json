@@ -8,7 +8,7 @@
   "execModel": "",
   "worker": {
     "command": "D:/OMP/omp.exe",
-    "args": ["--no-session", "--no-tools", "--no-skills", "--no-rules", "--mode", "text", "--cwd", "{projectDir}", "--max-time", "180", "-p", "{prompt}"],
+    "args": ["--no-session", "--no-tools", "--no-skills", "--no-rules", "--no-title", "--thinking", "off", "--mode", "text", "--cwd", "{projectDir}", "--max-time", "180", "-p", "{prompt}"],
     "input": "arg",
     "output": "stdout",
     "timeoutMs": 200000

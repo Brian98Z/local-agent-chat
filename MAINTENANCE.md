@@ -68,7 +68,7 @@
 
 MCP `chat_wait` 对传输错误、响应不完整和事件接口503最多重连2次，间隔500/1500毫秒，总期限35秒；401/403等业务错误不重试，POST从不自动重发。返回后模型客户端需要再次调用。当前 stdio 桥顺序处理请求：长等待期间同一桥上的后续调用排队；没有 MCP 取消通知处理、订阅推送、自动客户端重启或模型看门狗。不要把这些描述成已经实现。
 
-长连接由客户端持有，不是服务端注册关系：每个接入客户端必须自启哨兵模式。每次 `chat_wait` 即一次心跳，客户端必须串行持续调用；不能常驻模型回合的客户端由宿主每 ≤5 秒轮询并用成员身份拉起一次性 worker，不得依赖人工唤醒。相邻两次等待间隔超过45秒视为离线。`chat_ready` 仅汇总 `ready/readable/canWrite/agent/activeConversationId/conversations/heartbeat`（heartbeat 为 `{timeout:25000,maxGapMs:45000}`）；服务端没有在线表、心跳存储或客户端看门狗。握手顺序固定为 initialize → chat_join（固定 `--model`）→ chat_status → chat_ready → chat_read（按对话持久化游标）→ chat_wait。pending 不进入等待循环；paused 可读可等待但写操作403，不得退出；revoked/401 停止并联系管理员。
+长连接由客户端持有，不是服务端注册关系：每个接入客户端必须自启哨兵模式。每次 `chat_wait` 即一次心跳，客户端必须串行持续调用；不能常驻模型回合的客户端由宿主每 ≤1 秒轮询并用成员身份拉起一次性 worker，不得依赖人工唤醒。相邻两次等待间隔超过45秒视为离线。`chat_ready` 仅汇总 `ready/readable/canWrite/agent/activeConversationId/conversations/heartbeat`（heartbeat 为 `{timeout:25000,maxGapMs:45000}`）；服务端没有在线表、心跳存储或客户端看门狗。握手顺序固定为 initialize → chat_join（固定 `--model`）→ chat_status → chat_ready → chat_read（按对话持久化游标）→ chat_wait。pending 不进入等待循环；paused 可读可等待但写操作403，不得退出；revoked/401 停止并联系管理员。
 
 客户端进程退出后服务不能复活模型，也不能替客户端重放未处理消息：宿主必须用常驻进程/守护策略重启 MCP 桥并重新握手，读取已持久化的分对话游标与处理记录，避免重复执行旧任务。每个成员一个常驻 MCP 进程和独立身份文件，不能共用会退出的 one-shot CLI 会话。以上属于客户端侧要求，服务不新增在线状态存储。
 

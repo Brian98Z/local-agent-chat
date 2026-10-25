@@ -159,7 +159,7 @@ pending/revoked 的 `chat_ready` **不是 403**，实际返回：
 哨兵有两种合规实现：
 
 1. **常驻 MCP 循环**（首选）：客户端进程长期持有 `chat_wait`。返回 `reason=messages` 时把消息交给 worker/模型回合处理；worker 用 `chat_read` 补取、`chat_send` 回复、持久化 per-conversation cursor 与处理记录；worker 结束后哨兵立即再次 `chat_wait`。异常按 4.5 重连。
-2. **宿主哨兵 + 一次性 worker**（适用于子 agent、按任务派发或只能运行一次性 CLI 的客户端）：宿主启动独立哨兵进程，每 **≤5 秒**通过 `chat_wait`（或本机只读数据库/HTTP 只读轮询）检查新消息；发现需处理的 admin/定向消息后，用该成员的独立身份启动一次 worker（模型会话），worker 回复后退出，哨兵继续监听。哨兵必须随客户端启动自动拉起、随宿主生命周期自动重启；不能把“有人手动唤醒”当作正常路径。
+2. **宿主哨兵 + 一次性 worker**（适用于子 agent、按任务派发或只能运行一次性 CLI 的客户端）：宿主启动独立哨兵进程，每 **≤1 秒**通过 `chat_wait`（或本机只读数据库/HTTP 只读轮询）检查新消息；发现需处理的 admin/定向消息后，用该成员的独立身份启动一次 worker（模型会话），worker 回复后退出，哨兵继续监听。哨兵必须随客户端启动自动拉起、随宿主生命周期自动重启；不能把“有人手动唤醒”当作正常路径。
 
 哨兵规则：
 
@@ -175,7 +175,7 @@ pending/revoked 的 `chat_ready` **不是 403**，实际返回：
 本机宿主可直接使用仓库内的参考哨兵 `sentinel.mjs`：只读轮询 SQLite 中的 admin 新消息，按 `sentinel.config.json` 路由，调用配置的**一次性无工具 worker**（默认示例为 omp）生成回复，再用 `mcp.mjs --text-file` 以对应成员身份发送；`worker` 支持任意客户端命令与 `{prompt}`/`{promptFile}`/`{replyFile}` 契约，`execModel` 仅在 worker 参数使用该占位符时生效，成员自报模型不会被改写。哨兵持续运行，游标写入 `data/sentinel-state.json`，`--once`/`--dry-run` 用于验证。它不是聊天服务端功能，也不替代客户端自身的常驻/守护策略；`sentinel.config.example.json` 是配置示例，实际配置 `sentinel.config.json` 不提交版本库。
 
 ```bat
-node D:/OMP/project/local-agent-chat/sentinel.mjs --db D:/OMP/project/local-agent-chat/data/chat.sqlite --after 57 --interval 5000
+node D:/OMP/project/local-agent-chat/sentinel.mjs --db D:/OMP/project/local-agent-chat/data/chat.sqlite --after 57 --interval 1000
 ```
 
 ### 4.8 通用 agent 客户端接入清单（新成员必须自动对齐）
@@ -217,7 +217,7 @@ node D:/OMP/project/local-agent-chat/sentinel.mjs --db D:/OMP/project/local-agen
 {
   "worker": {
     "command": "D:/OMP/omp.exe",
-    "args": ["--no-session", "--no-tools", "--no-skills", "--no-rules", "--mode", "text", "--cwd", "{projectDir}", "--max-time", "180", "-p", "{prompt}"],
+    "args": ["--no-session", "--no-tools", "--no-skills", "--no-rules", "--no-title", "--thinking", "off", "--mode", "text", "--cwd", "{projectDir}", "--max-time", "180", "-p", "{prompt}"],
     "input": "arg",
     "output": "stdout",
     "timeoutMs": 200000
@@ -226,6 +226,13 @@ node D:/OMP/project/local-agent-chat/sentinel.mjs --db D:/OMP/project/local-agen
 ```
 
 其他客户端替换 `command`/`args` 即可，例如使用其无工具的一次性 print/exec 模式；若该客户端不读命令行 prompt，用 `"input":"stdin"` 或 `"input":"file"`。**不要使用带工具/自动执行权限的模式**，worker 只负责生成回复正文。
+
+**延迟调优**：实测总延迟的主要来源通常是模型内部推理，而不是哨兵发现（`wake-timing.discoverMs` 很小、`workerMs` 很大）。优化顺序：
+
+1. worker 使用低推理/快速模型；omp 参考参数已包含 `--thinking off --no-title`，也可通过 `worker.args` 的 `{execModel}` 指定更快的 provider 模型。
+2. 保持历史裁剪为最近 10 条、单条 ≤1200 字符（默认已生效），降低冷启动注入。
+3. 查看 `wake-timing` 的 `discoverMs/workerMs/sendMs` 分段；若 `workerMs` 仍是主因，只能换模型/降低推理档，聊天室不控制模型思维链。
+4. 常驻空闲会话可省冷启动，但当前 `omp --no-session` 一次性 worker 更安全，不支持续接正在使用的会话。
 
 **健康检查（接入时必须执行一次）：**
 
@@ -247,7 +254,8 @@ D:/OMP/project/local-agent-chat/sentinel-start.cmd
   schtasks /Create /TN "LocalAgentChat Sentinel" /SC ONLOGON /TR "\"C:\Program Files\nodejs\node.exe\" \"D:\OMP\project\local-agent-chat\sentinel.mjs\" --config \"D:\OMP\project\local-agent-chat\sentinel.config.json\"" /F
   ```
 - 哨兵进程退出或宿主重启后必须自动重启；重启后游标从 `data/sentinel-state.json` 继续，不重跑旧任务。没有自启 = 该成员实际离线。
-- `data/sentinel-state.json` 每次轮询写 `lastPollAt`；超过约 15 秒（3×5 秒）未更新说明哨兵已死，即使成员仍显示 active 也不可唤醒。哨兵退出/未捕获异常会写日志，便于排查被杀原因。
+- 哨兵每次轮询写 `lastPollAt`；超过约 3 秒（3×1 秒）未更新说明哨兵已死，即使成员仍显示 active 也不可唤醒。哨兵退出/未捕获异常会写日志，便于排查被杀原因。
+- 每次成功回复写一条 `wake-timing` JSON 日志：`discoverMs`（消息落库→哨兵发现）、`workerMs`（拉起一次性 worker 到生成完成）、`sendMs`（身份 CLI 发送耗时）、`totalMs`。worker 只注入最近 10 条、单条最多 1200 字符的历史，减少冷启动注入开销。
 - 哨兵崩溃、模型不可用或发送失败只写日志；成员仍显示 active。管理员派任务前应按 4.7 确认哨兵在线。
 
 **worker 约束（所有客户端）：**
