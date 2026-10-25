@@ -234,6 +234,10 @@ function start(config) {
         target TEXT NOT NULL,
         createdAt TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS tasks_owner_status ON tasks(owner, status);
     `);
     db.prepare('INSERT OR IGNORE INTO conversations (id,title,createdAt) VALUES (1,?,?)').run('初始对话', new Date().toISOString());
@@ -351,7 +355,7 @@ function start(config) {
 
   const adminToken = randomBytes(32).toString('hex');
   const adminHash = Buffer.from(tokenHash(adminToken), 'hex');
-  let registrationOpen = false;
+  let registrationOpen = sql("SELECT value FROM settings WHERE key = 'registrationOpen'").get()?.value === '1';
   let actualPort;
   let stopping = false;
 
@@ -583,6 +587,7 @@ function start(config) {
       fields(body, ['open'], ['open']);
       if (typeof body.open !== 'boolean') fail(400, 'open must be a boolean.');
       audit('admin', body.open ? 'registration.open' : 'registration.close', 'registration', new Date().toISOString());
+      sql("INSERT INTO settings (key,value) VALUES ('registrationOpen',?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(body.open ? '1' : '0');
       registrationOpen = body.open;
       return send(response, 200, { registrationOpen });
     }

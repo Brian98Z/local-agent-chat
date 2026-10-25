@@ -34,7 +34,7 @@
 }
 ```
 
-要求 PATH 中可找到 Node.js 22.13+。每个智能体**自行选择唯一名称、声明固定模型标识并使用独立身份文件**；第二个客户端可用“开发员”、`developer.key` 与自己的模型标识。名字去首尾空白、不区分大小写判重，登记后不能靠修改参数改名。模型标识 1..80 字符，由 `--model` 提交，首次登记后不可更改，并在成员列表作为描述显示；未配置 `--model` 时 `chat_join` 会明确失败，其他工具仍可读取自身状态。模型标识是自报描述，不证明真实模型。身份文件首次自动生成，保存64位十六进制秘密，后续复用，不发进聊天、提示词或版本库。
+要求 PATH 中可找到 Node.js 22.13+。每个智能体**自行选择唯一名称、声明固定模型标识并使用独立身份文件**；第二个客户端可用“开发员”、`developer.key` 与自己的模型标识。名字去首尾空白、不区分大小写判重，登记后不能靠修改参数改名。模型标识 1..80 字符，由 `--model` 提交，首次登记后不可更改，并在成员列表作为描述显示；未配置 `--model` 时 `chat_join` 会明确失败，其他工具仍可读取自身状态。模型标识是自报描述，不证明真实模型。身份文件首次**成功加入后**才生成，保存64位十六进制秘密，后续复用；登记被拒（403）不会产生孤儿 key，已有孤儿 key 可复用于重试，不发进聊天、提示词或版本库。
 
 外部工具超时建议至少45秒，以容纳默认25秒等待及有界重连。修改配置或新增工具后按客户端要求重载MCP。stdout仅换行JSON-RPC，stderr诊断；不要把桥当可直接输入聊天的终端程序。该桥必须作为**常驻**连接持有：单次 `--call` 进程在输出结果后退出，无法接收唤醒（握手与心跳见第4节）。
 
@@ -249,7 +249,8 @@ D:/OMP/project/local-agent-chat/sentinel-start.cmd
 ```
 
 - 该命令必须由宿主**随客户端启动自动执行**（Windows 登录时计划任务/启动文件夹、macOS launchd、Linux systemd 或客户端自带守护），不能依赖管理员在聊天里说“唤醒”。
-- 计划任务示例（按实际 Node 路径修改；以当前用户登录触发）：
+- Windows 本机已验证的免管理员做法：把启动脚本放进用户 Startup 文件夹（`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`），脚本先检查是否已有 `sentinel.mjs` 进程，无则用 `WScript.Shell.Run` 隐藏启动；计划任务在本机可能因权限返回“拒绝访问”。
+- 计划任务示例（需要相应权限；以当前用户登录触发）：
   ```bat
   schtasks /Create /TN "LocalAgentChat Sentinel" /SC ONLOGON /TR "\"C:\Program Files\nodejs\node.exe\" \"D:\OMP\project\local-agent-chat\sentinel.mjs\" --config \"D:\OMP\project\local-agent-chat\sentinel.config.json\"" /F
   ```

@@ -62,14 +62,29 @@ async function main() {
   if (base.protocol !== 'http:' || base.hostname !== '127.0.0.1' || base.username || base.password || base.pathname !== '/' || base.search || base.hash) throw new Error('--url must be http://127.0.0.1:PORT');
   await mkdir(dirname(identity), { recursive: true });
   let token;
+  let pendingIdentity = false;
   try {
-    const file = await open(identity, 'wx', 0o600);
-    try { token = randomBytes(32).toString('hex'); await file.writeFile(token + '\n'); } finally { await file.close(); }
-  } catch (error) {
-    if (error.code !== 'EEXIST') throw error;
     token = (await readFile(identity, 'utf8')).trim();
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    token = randomBytes(32).toString('hex');
+    pendingIdentity = true;
   }
   if (!/^[a-f0-9]{64}$/i.test(token)) throw new Error('Invalid identity file; use an independent valid identity file, never overwrite an existing identity.');
+
+  async function persistIdentity() {
+    if (!pendingIdentity) return;
+    try {
+      const file = await open(identity, 'wx', 0o600);
+      try { await file.writeFile(token + '\n'); } finally { await file.close(); }
+      pendingIdentity = false;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const existing = (await readFile(identity, 'utf8')).trim();
+      if (existing !== token) throw new Error('Identity file was created concurrently with a different token.');
+      pendingIdentity = false;
+    }
+  }
 
   async function request(path, body, timeout = 10000) {
     let response;
@@ -108,7 +123,11 @@ async function main() {
     switch (toolName) {
       case 'chat_join':
         if (!model) throw new Error('未声明模型标识；请为该客户端配置固定的 --model。');
-        return request('/api/join', { name, token, model });
+        {
+          const joined = await request('/api/join', { name, token, model });
+          await persistIdentity();
+          return joined;
+        }
       case 'chat_ready': {
         const me = await request('/api/me');
         const status = me.agent.status;

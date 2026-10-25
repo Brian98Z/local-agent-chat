@@ -43,7 +43,7 @@
 
 ## 管理员
 - `GET /api/admin/state` → `{registrationOpen,agents,conversations,activeConversationId,messages,tasks,audit}`；messages 最近200条和tasks只属当前对话，audit全局最近200；不返回凭据。agents 为全量身份（含 revoked）以便审计和历史名称解析，管理界面成员列表不显示 revoked。
-- `POST /api/admin/registration` body `{open:boolean}` → `{registrationOpen}`。每次服务启动强制关闭新登记，不影响已批准身份。
+- `POST /api/admin/registration` body `{open:boolean}` → `{registrationOpen}`。开关持久化到 SQLite，服务重启后保持上次状态；关闭登记不影响已批准身份。管理员应完成分批加入后主动关闭。
 - `POST /api/admin/agents/:id` body `{status:"active"|"paused"|"revoked"}` → `{agent}`。pending 可批准或撤销；active 可禁言或撤销；paused 可解禁或撤销；revoked 为终态。禁言即 status=paused，只阻断写操作；撤销后管理界面成员列表隐藏该身份。
 - `POST /api/admin/agents/bulk` body `{action:"approve"|"revoke"}` → `{action,updated}`。approve 在单个事务中把所有 pending 变为 active（不处理 paused）；revoke 把所有非 revoked 身份变为 revoked，并释放其 claimed 任务。仅管理员；非法 action 返回400；重复执行 updated 可为0。
 - 审计记录管理员准入操作及协作任务变化，字段 `{id,actor,action,target,createdAt}`。

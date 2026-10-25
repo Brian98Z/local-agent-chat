@@ -42,6 +42,7 @@
 | `messages` | 全局递增 id、conversationId、发送者、可空接收者、文本和时间 |
 | `tasks` | conversationId、状态与所有权；禁言/撤销释放覆盖所有对话 |
 | `audit` | 全局审计，不按当前对话裁剪，仅状态快照返回最近 200 条 |
+| `settings` | 持久化管理员开关（当前为 `registrationOpen`）；重启恢复 |
 | `service-lock.sqlite` | 独立 SQLite 独占事务持有 OS 锁；崩溃释放锁，不靠删文件 |
 
 当前迁移在 `server.mjs` 的初始化事务中：创建缺失表 → 插入初始对话/默认选择（已存在不覆盖）→ 用 `PRAGMA table_info` 检查并给旧 messages/tasks 添加 `conversationId DEFAULT 1`、给旧 agents 添加 `model DEFAULT ''` → 创建索引 → 提交。没有独立迁移目录或 schema version 计数器。`messages/tasks.conversationId` 当前由应用层检查关联，不能假设存在数据库外键。

@@ -86,6 +86,11 @@ test('real HTTP and MCP lifecycle: approval, private visibility, ownership, revo
   });
   assert.equal(navigationStatus, 200, 'Public administrator login page must open from external links');
   await admin('/api/admin/state', undefined, 403, navigationHeaders);
+  const rejectedIdentity = join(dir, 'rejected.key');
+  const rejectedBridge = bridge(server, 'Rejected', rejectedIdentity);
+  t.after(async () => stop(rejectedBridge.child));
+  assert.equal((await rejectedBridge.call('chat_join')).result.isError, true);
+  await assert.rejects(readFile(rejectedIdentity, 'utf8'), (error) => error.code === 'ENOENT');
   const aToken = secret(), bToken = secret(), cToken = secret();
   const a = client(server, aToken), b = client(server, bToken), c = client(server, cToken);
   await a('/api/join', { name: 'Alpha', token: aToken, model: 'model-alpha' }, 403);
@@ -206,7 +211,7 @@ test('real HTTP and MCP lifecycle: approval, private visibility, ownership, revo
   server = await start(); admin = client(server, server.admin);
   assert.notEqual(server.admin, oldAdmin);
   const restored = await admin('/api/admin/state');
-  assert.equal(restored.registrationOpen, false);
+  assert.equal(restored.registrationOpen, true);
   assert.equal(restored.agents.find(row => row.id === cid).status, 'revoked');
   assert.equal(restored.tasks.find(row => row.id === mtask.id).status, 'done');
   assert.ok(restored.messages.some(row => row.text === 'from MCP'));
@@ -290,7 +295,7 @@ test('conversations preserve history, isolate replies, wake readers and resume s
   assert.equal((await admin('/api/admin/state')).activeConversationId, first);
   assert.equal((await agent('/api/messages')).messages[0].text, '旧对话原文');
   assert.equal((await agent('/api/me')).agent.status, 'active');
-  assert.equal((await admin('/api/admin/state')).registrationOpen, false);
+  assert.equal((await admin('/api/admin/state')).registrationOpen, true);
   const mcp = bridge(server, '等待验证', join(data, 'wait.key'));
   t.after(async () => stop(mcp.child));
   await admin('/api/admin/registration', { open: true });
