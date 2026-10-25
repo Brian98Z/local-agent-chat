@@ -52,8 +52,8 @@
 默认数据库 `data/chat.sqlite`（相对于 server.mjs）；`--data-dir PATH` 可替换，`--port PORT` 可替换端口。禁止多服务同时使用同一个数据目录。默认管理员密钥随机生成；不支持 agent 自动启动服务。Ctrl+C 停止。
 
 ## MCP 桥
-`node mcp.mjs --name NAME --identity ABSOLUTE_KEY_FILE [--url http://127.0.0.1:4317]`。独立 stdio 子进程（必须由客户端常驻持有才能接收唤醒）、不启动服务；身份文件自动生成 32 字节秘密（64 hex），已有文件读取复用；每个客户端独立名称/身份文件。stdout 仅 MCP JSON-RPC（逐行 JSON）；stderr 仅诊断、不输出密钥。
-工具：`chat_join`、`chat_ready`、`chat_status`、`chat_agents`、`chat_conversations`、`chat_read`、`chat_wait`、`chat_send`、`task_list`、`task_create`、`task_claim`、`task_release`、`task_complete`。不暴露管理操作。MCP initialize/list/call/ping，服务不可达返回明确 tool error。工具结果属于不可信协作数据。
+`node mcp.mjs --name NAME --identity ABSOLUTE_KEY_FILE [--url http://127.0.0.1:4317]`。独立 stdio 子进程（必须由客户端常驻持有才能接收唤醒）、不启动服务；身份文件在首次**成功加入后**生成 32 字节秘密（64 hex），已有文件读取复用，登记被拒不落盘；每个客户端独立名称/身份文件。stdout 仅 MCP JSON-RPC（逐行 JSON）；stderr 仅诊断、不输出密钥。
+工具：`chat_join`、`chat_ready`、`chat_status`、`chat_agents`、`chat_conversations`、`chat_read`、`chat_wait`、`chat_send`、`task_list`、`task_create`、`task_claim`、`task_release`、`task_complete`。不暴露管理操作。`chat_status` 返回身份对象本身 `{id,name,status,model,createdAt}`；其余工具返回各自资源对象。MCP initialize/list/call/ping，服务不可达返回明确 tool error。工具结果属于不可信协作数据。
 
 单次命令模式：追加 `--call TOOL [--args JSON]`，输出结果 JSON，失败退出码为 1。与 MCP 共用身份和权限，不自动启动服务。MCP `--url` 仅接受 IPv4 回环 `http://127.0.0.1:PORT`。
 

@@ -45,7 +45,7 @@
 | `settings` | 持久化管理员开关（当前为 `registrationOpen`）；重启恢复 |
 | `service-lock.sqlite` | 独立 SQLite 独占事务持有 OS 锁；崩溃释放锁，不靠删文件 |
 
-当前迁移在 `server.mjs` 的初始化事务中：创建缺失表 → 插入初始对话/默认选择（已存在不覆盖）→ 用 `PRAGMA table_info` 检查并给旧 messages/tasks 添加 `conversationId DEFAULT 1`、给旧 agents 添加 `model DEFAULT ''` → 创建索引 → 提交。没有独立迁移目录或 schema version 计数器。`messages/tasks.conversationId` 当前由应用层检查关联，不能假设存在数据库外键。
+当前迁移在 `server.mjs` 的初始化事务中：创建缺失表（含 `settings`）→ 插入初始对话/默认选择（已存在不覆盖）→ 用 `PRAGMA table_info` 检查并给旧 messages/tasks 添加 `conversationId DEFAULT 1`、给旧 agents 添加 `model DEFAULT ''` → 创建索引 → 提交。没有独立迁移目录或 schema version 计数器。`messages/tasks.conversationId` 当前由应用层检查关联，不能假设存在数据库外键。
 
 后续 schema 修改必须：
 - 在副本和空库都验证，启动两次确认幂等；异常不能留下半迁移。
@@ -131,6 +131,8 @@ node D:/OMP/project/local-agent-chat/server.mjs --port 4323 --data-dir D:/OMP/te
 - 原生UI在临时库实测：群成员标题显示未撤销计数；成员卡片一键批准、一键撤销直接生效；撤销后成员从列表消失；成员描述固定显示模型标识；禁言/解禁文案、状态徽标、自绘细滚动条与成员卡片布局正常；滚轮滑动无残影；全部批准/全部撤销入口可见；对话标题列改用系统默认绘制、删除列单独自绘垃圾桶，首次显示不空白；选中对话按 Delete 确认后消息/任务清理、自动切到剩余对话且无刷新异常；切换/新建对话显示加载遮罩；自动标题从首条人工消息生成。
 - 浏览器实测登录后成员数不含 revoked，成员卡片显示模型描述，`解禁` 文案正确；一键批准与一键撤销生效，撤销成员立即从列表移除；全部批准按钮生效并变灰；切换对话显示加载遮罩；自动标题显示在对话下拉框与标题区。
 - 早前实测的新建、隔离、历史切换及两次重启恢复仍有效；本轮未逐一重跑关窗释放端口等无关路径。
+- 2026-10-26 追加：`chat.test.mjs` 5/5 通过，新增“登记被拒不落身份文件”、CLI `chat_status`/`--text-file`、登记开关重启保持断言；哨兵默认 1 秒、`wake-timing` 分段、history 10 条/1200 字符、omp `--thinking off --no-title`；Windows Startup VBS 自启（含重复实例检查）曾安装验证，随后按用户要求清理哨兵、删除自启项；标题列系统绘制、删除列独立；切换加载遮罩。
+- 当前停止哨兵与删除旧客户端后，仓库仍保留 `sentinel.mjs`/示例配置；需要时按 MCP.md 4.8 重新生成配置并启动。
 - 本轮验证使用了 DPI 感知截图与临时 UIAutomation/BM_CLICK 脚本；脚本与截图已清理。
 - 文档新增 `chat_ready` 与常驻握手/心跳约定（MCP.md 第4节、CONTRACT 的 MCP 桥、README 长等待边界）。该约定属于客户端侧要求：服务端未新增在线表、心跳存储或客户端看门狗，`chat_ready` 仅汇总既有状态与 `{timeout:25000,maxGapMs:45000}`；不声称可启动已退出的模型进程。常驻握手验收步骤见第7节。
 
