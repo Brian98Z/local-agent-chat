@@ -9,3 +9,12 @@ data-*/
 *.log
 node_modules/
 sentinel.config.json
+
+# Local sentinel runtime state and captured chat logs
+agent-chat-sentinel/*.config.json
+agent-chat-sentinel/*-state.json
+agent-chat-sentinel/*.lock
+agent-chat-sentinel/logs/
+agent-chat-sentinel/*-logs/
+# Local backup of the removed controlled-update store
+chat-controlled-versions-backup.zip

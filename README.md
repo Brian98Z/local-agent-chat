@@ -17,7 +17,7 @@
 4. 选择广播或成员，直接发送任务。**回车发送，Ctrl+回车换行**；不需要单独配置任务页。
 5. 关闭窗口会停止它启动的服务。不要同时启动两个使用相同数据目录的实例。
 
-本机日常入口指向主项目 `LocalAgentChat.exe`。开发用 Controlled Updates 入口的独立版本库为 `D:/OMP/project/chat-controlled-versions`；首次运行会重新构建和隔离预检，不能与日常客户端同时使用同一数据目录。
+本机日常入口指向主项目 `LocalAgentChat.exe`。历史受控更新版本库已移除，仅保留备份包 `chat-controlled-versions-backup.zip`；受控入口本身使用 `hot-launcher.mjs --store <版本库路径>`，首次运行会重新构建和隔离预检，不能与日常客户端同时使用同一数据目录。
 
 从源码构建 Windows 客户端：
 
