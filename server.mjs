@@ -5,6 +5,10 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { createScoring } from './scoring.mjs';
+import { createGroupTools } from './group-tools.mjs';
+import { registerVoteGameTools } from './vote-game-tools.mjs';
+import { registerERC20Tools } from './erc20-tools.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const MAX_BODY_BYTES = 64 * 1024;
@@ -82,7 +86,7 @@ function integer(value, field, minimum, maximum) {
   return parsed;
 }
 
-async function jsonBody(request) {
+async function jsonBody(request, maxBytes = MAX_BODY_BYTES) {
   const contentType = request.headers['content-type'];
   if (typeof contentType !== 'string' || contentType.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
     request.resume();
@@ -92,7 +96,7 @@ async function jsonBody(request) {
     request.resume();
     fail(415, 'Compressed request bodies are not supported.');
   }
-  if (request.headers['content-length'] && Number(request.headers['content-length']) > MAX_BODY_BYTES) {
+  if (request.headers['content-length'] && Number(request.headers['content-length']) > maxBytes) {
     request.resume();
     fail(413, 'Request body is too large.');
   }
@@ -103,7 +107,7 @@ async function jsonBody(request) {
     request.on('data', (chunk) => {
       if (rejected) return;
       length += chunk.length;
-      if (length > MAX_BODY_BYTES) {
+      if (length > maxBytes) {
         rejected = true;
         chunks.length = 0;
         rejectBody(new HttpError(413, 'Request body is too large.'));
@@ -248,11 +252,37 @@ function start(config) {
         db.exec(`ALTER TABLE ${table} ADD COLUMN conversationId INTEGER NOT NULL DEFAULT 1 CHECK (conversationId > 0)`);
       }
     }
+    if (!db.prepare('PRAGMA table_info(messages)').all().some((column) => column.name === 'toAdmin')) {
+      db.exec('ALTER TABLE messages ADD COLUMN toAdmin INTEGER NOT NULL DEFAULT 0 CHECK (toAdmin IN (0,1))');
+    }
+    if (!db.prepare('PRAGMA table_info(messages)').all().some((column) => column.name === 'replyTo')) {
+      db.exec('ALTER TABLE messages ADD COLUMN replyTo INTEGER');
+    }
+    if (!db.prepare('PRAGMA table_info(messages)').all().some((column) => column.name === 'clientMessageId')) {
+      db.exec('ALTER TABLE messages ADD COLUMN clientMessageId TEXT');
+    }
+    if (!db.prepare('PRAGMA table_info(messages)').all().some((column) => column.name === 'kind')) {
+      db.exec("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'message'");
+    }
+    if (!db.prepare('PRAGMA table_info(messages)').all().some((column) => column.name === 'clientPayload')) {
+      db.exec('ALTER TABLE messages ADD COLUMN clientPayload TEXT');
+    }
     if (!db.prepare('PRAGMA table_info(agents)').all().some((column) => column.name === 'model')) {
       db.exec("ALTER TABLE agents ADD COLUMN model TEXT NOT NULL DEFAULT ''");
     }
     db.exec(`
+      CREATE TABLE IF NOT EXISTS attachments (
+        id TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        name TEXT NOT NULL,
+        contentType TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        data BLOB NOT NULL,
+        messageId INTEGER REFERENCES messages(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS attachments_message_id ON attachments(messageId);
       CREATE INDEX IF NOT EXISTS messages_conversation_id ON messages(conversationId,id);
+      CREATE UNIQUE INDEX IF NOT EXISTS messages_client_id ON messages(conversationId,"from",clientMessageId) WHERE clientMessageId IS NOT NULL;
       CREATE INDEX IF NOT EXISTS tasks_conversation_id ON tasks(conversationId,id);
       COMMIT;
     `);
@@ -262,6 +292,25 @@ function start(config) {
     lock.close();
     throw new Error('Unable to open or initialize the chat database.');
   }
+
+  const scoring = createScoring(db);
+  const groupTools = createGroupTools();
+  function toolConversation(args, actor, writing) {
+    if (stopping) fail(503, 'Server is stopping.');
+    if (!actor.admin) {
+      const current = getAgent(actor.id);
+      if (!current || !['active', 'paused'].includes(current.status)) fail(403, 'Member approval is required.');
+      if (writing && current.status !== 'active') fail(403, 'Agent is muted; write operations are not allowed.');
+    }
+    if (!Number.isSafeInteger(args.conversationId) || args.conversationId < 1) fail(400, 'conversationId is required.');
+    if (!getConversation(args.conversationId)) fail(404, 'Conversation not found.');
+    if (writing && args.conversationId !== activeConversationId()) fail(409, 'Conversation is no longer active.');
+    return args.conversationId;
+  }
+  const toolContext = { db, read: (args, actor) => toolConversation(args, actor, false), write: (args, actor) => toolConversation(args, actor, true) };
+  registerVoteGameTools(groupTools, toolContext);
+  registerERC20Tools(groupTools, toolContext);
+  groupTools.seal();
 
   const statements = new Map();
   function sql(query) {
@@ -333,7 +382,7 @@ function start(config) {
     const created = new Date(conversation.createdAt);
     if (!Number.isNaN(created.getTime()) && conversation.title === defaultConversationTitle(created)) eligible = true;
     if (conversation.title === '初始对话') {
-      const counts = sql('SELECT (SELECT COUNT(*) FROM messages WHERE conversationId = ? AND "from" = \'admin\') AS adminMessages, (SELECT COUNT(*) FROM tasks WHERE conversationId = ?) AS tasks').get(conversationId, conversationId);
+      const counts = sql('SELECT (SELECT COUNT(*) FROM messages WHERE conversationId = ? AND "from" = \'admin\' AND "to" IS NULL AND toAdmin = 0) AS adminMessages, (SELECT COUNT(*) FROM tasks WHERE conversationId = ?) AS tasks').get(conversationId, conversationId);
       eligible = counts.adminMessages <= 1 && counts.tasks <= 1;
     }
     if (!eligible) return;
@@ -342,13 +391,52 @@ function start(config) {
     sql('UPDATE conversations SET title = ? WHERE id = ? AND title = ?').run(title, conversationId, conversation.title);
   }
 
+  function withAttachments(messages) {
+    if (!messages.length) return messages;
+    // Resolve the current active roster once per synchronous message projection.
+    const mentionPatterns = sql("SELECT id,name FROM agents WHERE status = 'active' ORDER BY id").all().map((agent) => {
+      const escaped = agent.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return { id: agent.id, pattern: new RegExp(`@${escaped}(?![\\p{L}\\p{N}_])`, 'iu') };
+    });
+    const attachmentsByMessage = new Map();
+    // Callers supply at most one page (200 IDs); cache one statement per page size.
+    const placeholders = messages.map(() => '?').join(',');
+    const attachments = sql(`SELECT messageId,id,name,contentType,size FROM attachments WHERE messageId IN (${placeholders}) ORDER BY messageId,rowid`).all(...messages.map((message) => message.id));
+    for (const { messageId, ...attachment } of attachments) {
+      let list = attachmentsByMessage.get(messageId);
+      if (!list) attachmentsByMessage.set(messageId, list = []);
+      list.push(attachment);
+    }
+    return messages.map((message) => {
+      const mentions = [];
+      if (message.text.includes('@')) {
+        for (const { id, pattern } of mentionPatterns) {
+          if (pattern.test(message.text)) mentions.push(id);
+        }
+      }
+      const { clientPayload, ...publicMessage } = message;
+      return { ...publicMessage, mentions, attachments: attachmentsByMessage.get(message.id) ?? [] };
+    });
+  }
+
   function visibleMessages(actor, conversationId, after, limit) {
-    return actor.admin
-      ? sql('SELECT * FROM messages WHERE conversationId = ? AND id > ? ORDER BY id LIMIT ?').all(conversationId, after, limit)
-      : sql('SELECT * FROM messages WHERE conversationId = ? AND id > ? AND ("to" IS NULL OR "to" = ? OR "from" = ?) ORDER BY id LIMIT ?').all(conversationId, after, actor.id, actor.id, limit);
+    const rows = actor.admin
+      ? sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? AND id > ? ORDER BY id LIMIT ?').all(conversationId, after, limit)
+      : sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? AND id > ? AND (("to" IS NULL AND toAdmin = 0) OR "to" = ? OR "from" = ?) ORDER BY id LIMIT ?').all(conversationId, after, actor.id, actor.id, limit);
+    return withAttachments(rows);
+  }
+
+  function earliestAvailableId(actor, conversationId) {
+    const row = actor.admin
+      ? sql('SELECT MIN(id) AS id FROM messages WHERE conversationId = ?').get(conversationId)
+      : sql('SELECT MIN(id) AS id FROM messages WHERE conversationId = ? AND (("to" IS NULL AND toAdmin = 0) OR "to" = ? OR "from" = ?)').get(conversationId, actor.id, actor.id);
+    return row.id;
   }
 
   const eventWaiters = new Set();
+  // Heartbeats are process-local observations, not persisted presence claims.
+  const heartbeats = new Map();
+  const heartbeatMaxGapMs = 45000;
   function wakeEventWaiters() {
     for (const wake of eventWaiters) wake();
   }
@@ -407,7 +495,7 @@ function start(config) {
           const actor = authenticate(request, 'member');
           const activeId = activeConversationId();
           if (activeId !== conversationId) {
-            finish(null, { conversationId: activeId, changed: true, messages: [], cursor: 0, reason: 'conversation_changed' });
+            finish(null, { conversationId: activeId, changed: true, messages: [], cursor: 0, reason: 'conversation_changed', earliest_available_id: earliestAvailableId(actor, activeId) });
             return;
           }
           const messages = visibleMessages(actor, activeId, after, 100);
@@ -417,6 +505,7 @@ function start(config) {
               changed: false,
               messages,
               cursor: messages.at(-1)?.id ?? after,
+              earliest_available_id: earliestAvailableId(actor, activeId),
               reason: messages.length ? 'messages' : 'timeout',
             });
           }
@@ -558,6 +647,7 @@ function start(config) {
         }
         sql('DELETE FROM messages WHERE conversationId = ?').run(id);
         sql('DELETE FROM tasks WHERE conversationId = ?').run(id);
+        scoring.deleteConversation(id);
         sql('DELETE FROM conversations WHERE id = ?').run(id);
         audit('admin', 'conversation.delete', id, now);
         return { deletedId: id, activeConversationId: activeConversationId() };
@@ -574,7 +664,7 @@ function start(config) {
         conversations: allConversations(),
         activeConversationId: conversationId,
         agents: sql('SELECT id,name,status,model,createdAt FROM agents ORDER BY createdAt,id').all(),
-        messages: sql('SELECT * FROM messages WHERE conversationId = ? ORDER BY id DESC LIMIT 200').all(conversationId).reverse(),
+        messages: withAttachments(sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? ORDER BY id DESC LIMIT 200').all(conversationId).reverse()),
         tasks: allTasks(conversationId),
         audit: sql('SELECT * FROM audit ORDER BY id DESC LIMIT 200').all().reverse(),
       });
@@ -646,16 +736,74 @@ function start(config) {
       return send(response, 200, { agent });
     }
 
+    if (path === '/api/group-tools' && method === 'GET') {
+      return send(response, 200, { tools: groupTools.list(authenticate(request, 'member')) });
+    }
+    if (path === '/api/group-tools/invoke' && method === 'POST') {
+      authenticate(request, 'member');
+      const body = await jsonBody(request);
+      const actor = authenticate(request, 'member');
+      fields(body, ['name', 'arguments'], ['name', 'arguments']);
+      if (typeof body.name !== 'string' || !/^[a-z][a-z0-9_.-]{0,63}$/.test(body.name) || !body.arguments || typeof body.arguments !== 'object' || Array.isArray(body.arguments)) fail(400, 'Invalid tool invocation.');
+      const available = groupTools.list(actor).find(tool => tool.name === body.name);
+      if (!available) fail(404, 'Tool not found or not permitted.');
+      try { return send(response, 200, { result: await groupTools.invoke(body.name, body.arguments, actor) }); }
+      catch (error) {
+        if (error instanceof TypeError) fail(400, error.message);
+        if ([400, 403, 404, 409, 422, 502, 503, 504].includes(error.statusCode)) fail(error.statusCode, error.message);
+        throw error;
+      }
+    }
+
+    if (path === '/api/scoring' && method === 'GET') {
+      authenticate(request, 'member');
+      const conversationId = readConversationId(url.searchParams);
+      return send(response, 200, { conversationId, leaderboard: scoring.leaderboard(conversationId), rounds: scoring.listRounds(conversationId) });
+    }
+    if (path === '/api/admin/scoring/rounds' && method === 'POST') {
+      authenticate(request, 'admin');
+      const body = await jsonBody(request);
+      authenticate(request, 'admin');
+      fields(body, ['conversationId', 'roundKey'], ['roundKey']);
+      const conversationId = writeConversationId(body);
+      const roundKey = text(body.roundKey, 'roundKey', 1, 160, true);
+      const existingRound = sql('SELECT id FROM scoring_rounds WHERE conversationId = ? AND roundKey = ?').get(conversationId, roundKey);
+      if (!existingRound && !sql("SELECT 1 FROM agents WHERE status = 'active' LIMIT 1").get()) fail(409, 'No active members available for audit.');
+      const round = scoring.selectRound(conversationId, roundKey);
+      return send(response, 200, { round });
+    }
+    const scoreMatch = /^\/api\/admin\/scoring\/rounds\/(\d+)\/award$/.exec(path);
+    if (scoreMatch && method === 'POST') {
+      authenticate(request, 'admin');
+      const body = await jsonBody(request);
+      authenticate(request, 'admin');
+      fields(body, ['points', 'evidence', 'rationale'], ['points', 'evidence', 'rationale']);
+      const id = integer(scoreMatch[1], 'round id', 1, Number.MAX_SAFE_INTEGER);
+      const round = scoring.getRound(id);
+      if (!round) fail(404, 'Audit round not found.');
+      if (round.conversationId !== activeConversationId()) fail(409, 'Conversation changed.');
+      if (round.points !== null) fail(409, 'Audit round already scored.');
+      if (!Number.isSafeInteger(body.points) || body.points < 0 || body.points > 100) fail(400, 'Invalid points.');
+      const evidence = text(body.evidence, 'evidence', 1, 8000, true);
+      const rationale = text(body.rationale, 'rationale', 1, 8000, true);
+      return send(response, 200, { round: scoring.recordAward(id, { points: body.points, evidence, rationale, adjudicator: 'admin' }) });
+    }
+
     if (path === '/api/agents' && method === 'GET') {
       const actor = authenticate(request, 'member');
-      const agents = actor.admin
+      const rows = actor.admin
         ? sql('SELECT id,name,status,model,createdAt FROM agents ORDER BY createdAt,id').all()
         : sql("SELECT id,name,status,model,createdAt FROM agents WHERE status = 'active' ORDER BY createdAt,id").all();
+      const now = Date.now();
+      const agents = rows.map((agent) => {
+        const last = heartbeats.get(agent.id);
+        return { ...agent, lastHeartbeatAt: last === undefined ? null : new Date(last).toISOString(), online: last !== undefined && now - last <= heartbeatMaxGapMs && (agent.status === 'active' || agent.status === 'paused') };
+      });
       return send(response, 200, { agents });
     }
 
     if (path === '/api/events' && method === 'GET') {
-      authenticate(request, 'member');
+      const actor = authenticate(request, 'member');
       for (const key of url.searchParams.keys()) {
         if (!['conversationId', 'after', 'timeout'].includes(key)) fail(400, 'Unknown event parameter.');
         if (url.searchParams.getAll(key).length > 1) fail(400, 'Repeated event parameter.');
@@ -663,19 +811,59 @@ function start(config) {
       const conversationId = integer(url.searchParams.get('conversationId'), 'conversationId', 1, Number.MAX_SAFE_INTEGER);
       const after = integer(url.searchParams.get('after') ?? '0', 'after', 0, Number.MAX_SAFE_INTEGER);
       const timeout = integer(url.searchParams.get('timeout') ?? '25000', 'timeout', 1, 25000);
+      if (!actor.admin) heartbeats.set(actor.id, Date.now());
       const result = await waitForEvents(request, response, conversationId, after, timeout);
+      if (!actor.admin && result !== null) heartbeats.set(actor.id, Date.now());
       if (result !== null) return send(response, 200, result);
+      return;
+    }
+
+    if (path === '/api/attachments' && method === 'POST') {
+      authenticate(request);
+      const body = await jsonBody(request, 14 * 1024 * 1024 + 65536);
+      const actor = authenticate(request);
+      fields(body, ['name', 'contentType', 'data'], ['name', 'contentType', 'data']);
+      const name = text(body.name, 'name', 1, 255);
+      if (/[\x00-\x1f\x7f/\\]/.test(name)) fail(400, 'Invalid attachment name.');
+      const contentType = text(body.contentType, 'contentType', 1, 127);
+      if (!/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(contentType)) fail(400, 'Invalid contentType.');
+      if (typeof body.data !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(body.data)) fail(400, 'Invalid base64 data.');
+      const data = Buffer.from(body.data, 'base64');
+      if (data.length > 10 * 1024 * 1024) fail(413, 'Attachment is too large.');
+      const quota = sql('SELECT COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes FROM attachments WHERE owner = ? AND messageId IS NULL').get(actor.id);
+      if (quota.count >= 20 || quota.bytes + data.length > 50 * 1024 * 1024) fail(413, 'Unattached attachment quota exceeded.');
+      const id = randomUUID();
+      sql('INSERT INTO attachments (id,owner,name,contentType,size,data) VALUES (?,?,?,?,?,?)').run(id, actor.id, name, contentType, data.length, data);
+      return send(response, 201, { attachment: { id, name, contentType, size: data.length } });
+    }
+
+    const attachmentMatch = /^\/api\/attachments\/([0-9a-f-]+)$/.exec(path);
+    if (attachmentMatch && method === 'DELETE') {
+      const actor = authenticate(request);
+      const result = sql('DELETE FROM attachments WHERE id = ? AND owner = ? AND messageId IS NULL').run(attachmentMatch[1], actor.id);
+      if (!result.changes) fail(404, 'Unattached attachment not found.');
+      return send(response, 200, { deleted: true });
+    }
+    if (attachmentMatch && method === 'GET') {
+      const actor = authenticate(request, 'member');
+      const attachment = sql('SELECT a.*, m."from" AS sender, m."to" AS recipient, m.toAdmin FROM attachments a LEFT JOIN messages m ON m.id = a.messageId WHERE a.id = ?').get(attachmentMatch[1]);
+      if (!attachment || (!actor.admin && (attachment.messageId === null ? attachment.owner !== actor.id : !(attachment.sender === actor.id || attachment.recipient === actor.id || (attachment.recipient === null && !attachment.toAdmin))))) fail(404, 'Attachment not found.');
+      response.writeHead(200, { 'Content-Type': attachment.contentType, 'Content-Length': attachment.size, 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(attachment.name).replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase())}` });
+      response.end(attachment.data);
       return;
     }
 
     if (path === '/api/messages' && method === 'GET') {
       const actor = authenticate(request, 'member');
       const conversationId = readConversationId(url.searchParams);
-      if (url.searchParams.getAll('after').length > 1 || url.searchParams.getAll('limit').length > 1) fail(400, 'Repeated pagination parameter.');
+      if (['after', 'before', 'limit'].some((key) => url.searchParams.getAll(key).length > 1) || (url.searchParams.has('before') && url.searchParams.has('after'))) fail(400, 'Invalid pagination parameters.');
       const after = integer(url.searchParams.get('after') ?? '0', 'after', 0, Number.MAX_SAFE_INTEGER);
+      const before = url.searchParams.has('before') ? integer(url.searchParams.get('before'), 'before', 1, Number.MAX_SAFE_INTEGER) : null;
       const limit = integer(url.searchParams.get('limit') ?? '100', 'limit', 1, 200);
-      const messages = visibleMessages(actor, conversationId, after, limit);
-      return send(response, 200, { messages, cursor: messages.at(-1)?.id ?? after, conversationId });
+      const messages = before === null ? visibleMessages(actor, conversationId, after, limit) : withAttachments((actor.admin
+        ? sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? AND id < ? ORDER BY id DESC LIMIT ?').all(conversationId, before, limit)
+        : sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? AND id < ? AND (("to" IS NULL AND toAdmin = 0) OR "to" = ? OR "from" = ?) ORDER BY id DESC LIMIT ?').all(conversationId, before, actor.id, actor.id, limit)).reverse());
+      return send(response, 200, { messages, cursor: messages.at(-1)?.id ?? after, conversationId, earliest_available_id: earliestAvailableId(actor, conversationId) });
     }
 
     if (path === '/api/messages' && method === 'POST') {
@@ -683,20 +871,50 @@ function start(config) {
       const body = await jsonBody(request);
       // Recheck after receiving the body: an administrator may have muted this agent.
       const actor = authenticate(request);
-      fields(body, ['text', 'to', 'conversationId'], ['text']);
-      const messageText = text(body.text, 'text', 1, 8000);
-      const to = body.to === undefined || body.to === null ? null : agentId(body.to);
-      if (to !== null) {
-        const target = getAgent(to);
-        if (!target) fail(404, 'Recipient not found.');
-        if (target.status !== 'active') fail(409, 'Recipient is not active.');
-      }
+      fields(body, ['text', 'to', 'conversationId', 'attachmentIds', 'replyTo', 'clientMessageId', 'kind'], ['text']);
+      const messageText = text(body.text, 'text', 0, 8000);
+      const attachmentIds = body.attachmentIds === undefined ? [] : body.attachmentIds;
+      if (!Array.isArray(attachmentIds) || attachmentIds.length > 10 || attachmentIds.some((id) => typeof id !== 'string' || !AGENT_ID_PATTERN.test(id)) || new Set(attachmentIds).size !== attachmentIds.length) fail(400, 'Invalid attachmentIds.');
+      if (!messageText.trim() && !attachmentIds.length) fail(400, 'A message must contain text or an attachment.');
+      const clientMessageId = body.clientMessageId === undefined ? null : text(body.clientMessageId, 'clientMessageId', 1, 128);
+      const kind = body.kind === undefined ? 'message' : text(body.kind, 'kind', 1, 64);
+      if (body.replyTo !== undefined && body.replyTo !== null && (!Number.isSafeInteger(body.replyTo) || body.replyTo < 1)) fail(400, 'Invalid replyTo.');
+      const toAdmin = body.to === 'admin';
+      if (toAdmin && actor.admin) fail(400, 'Administrator cannot send a message to itself.');
+      const to = body.to === undefined || body.to === null || toAdmin ? null : agentId(body.to);
+      const clientPayload = JSON.stringify({ text: messageText, to: toAdmin ? 'admin' : to, replyTo: body.replyTo ?? null, attachmentIds, kind });
       const message = transaction(() => {
         const conversationId = writeConversationId(body);
-        const result = sql('INSERT INTO messages ("from","to",text,createdAt,conversationId) VALUES (?,?,?,?,?)').run(actor.id, to, messageText, new Date().toISOString(), conversationId);
-        const row = sql('SELECT * FROM messages WHERE id = ?').get(result.lastInsertRowid);
-        if (actor.admin) autoTitleConversation(conversationId, messageText);
-        return row;
+        if (clientMessageId !== null) {
+          const existing = sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? AND "from" = ? AND clientMessageId = ?').get(conversationId, actor.id, clientMessageId);
+          if (existing) {
+            if (existing.clientPayload !== clientPayload) fail(409, 'clientMessageId already used with different message content.');
+            return withAttachments([existing])[0];
+          }
+        }
+        if (to !== null) {
+          const target = getAgent(to);
+          if (!target) fail(404, 'Recipient not found.');
+          if (target.status !== 'active') fail(409, 'Recipient is not active.');
+        }
+        let replyTo = null;
+        if (body.replyTo !== undefined && body.replyTo !== null) {
+          if (!Number.isSafeInteger(body.replyTo) || body.replyTo < 1) fail(400, 'Invalid replyTo.');
+          const targetMessage = sql('SELECT "from","to",toAdmin FROM messages WHERE id = ? AND conversationId = ?').get(body.replyTo, conversationId);
+          if (!targetMessage || (!actor.admin && !(targetMessage.from === actor.id || targetMessage.to === actor.id || (targetMessage.to === null && !targetMessage.toAdmin)))) fail(404, 'Reply target not found.');
+          if ((targetMessage.to !== null || targetMessage.toAdmin) && to === null && !toAdmin) fail(400, 'A private message cannot be referenced in a broadcast.');
+          if (to !== null && (targetMessage.to !== null || targetMessage.toAdmin) && to !== targetMessage.from && to !== targetMessage.to) fail(400, 'Reply recipient cannot see the referenced message.');
+          replyTo = body.replyTo;
+        }
+        const result = sql('INSERT INTO messages ("from","to",text,createdAt,conversationId,toAdmin,replyTo,clientMessageId,clientPayload,kind) VALUES (?,?,?,?,?,?,?,?,?,?)').run(actor.id, to, messageText, new Date().toISOString(), conversationId, toAdmin ? 1 : 0, replyTo, clientMessageId, clientMessageId === null ? null : clientPayload, kind);
+        if (actor.admin) scoring.selectMessageRound(conversationId, Number(result.lastInsertRowid));
+        for (const id of attachmentIds) {
+          const updated = sql('UPDATE attachments SET messageId = ? WHERE id = ? AND owner = ? AND messageId IS NULL').run(result.lastInsertRowid, id, actor.id);
+          if (updated.changes !== 1) fail(404, 'Attachment not found or already attached.');
+        }
+        const row = sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE id = ?').get(result.lastInsertRowid);
+        if (actor.admin && to === null) autoTitleConversation(conversationId, messageText);
+        return withAttachments([row])[0];
       });
       wakeEventWaiters();
       return send(response, 201, { message });
@@ -765,7 +983,7 @@ function start(config) {
       return send(response, 200, { task });
     }
 
-    if (['/api/join', '/api/me', '/api/admin/state', '/api/admin/registration', '/api/admin/conversations', '/api/conversations', '/api/agents', '/api/messages', '/api/tasks', '/api/events'].includes(path) || adminAgentMatch || activateConversationMatch || deleteConversationMatch || taskMatch) {
+    if (['/api/join', '/api/me', '/api/admin/state', '/api/admin/registration', '/api/admin/conversations', '/api/conversations', '/api/agents', '/api/messages', '/api/attachments', '/api/tasks', '/api/events', '/api/group-tools', '/api/scoring', '/api/admin/scoring/rounds'].includes(path) || scoreMatch || attachmentMatch || adminAgentMatch || activateConversationMatch || deleteConversationMatch || taskMatch) {
       fail(405, 'Method not allowed.');
     }
     fail(404, 'Not found.');

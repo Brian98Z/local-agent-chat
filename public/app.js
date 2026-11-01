@@ -221,6 +221,36 @@ function renderMessages(messages) {
     const time = node('time', 'meta', dateText(message.createdAt));
     heading.append(sender, recipient, time);
     root.append(heading, node('p', 'message-body', message.text));
+    for (const attachment of message.attachments ?? []) {
+      const download = node('button', '', `下载 ${attachment.name} (${attachment.size} B)`);
+      download.type = 'button';
+      download.dataset.operation = 'attachment-download';
+      download.addEventListener('click', async () => {
+        const session = generation;
+        download.disabled = true;
+        try {
+          const response = await fetch(`/api/attachments/${encodeURIComponent(attachment.id)}`, {
+            headers: { Authorization: `Bearer ${token}` },
+            signal: controller.signal, redirect: 'error', cache: 'no-store', credentials: 'omit',
+          });
+          if (!response.ok) throw new Error(`附件下载失败（HTTP ${response.status}）。`);
+          const blob = await response.blob();
+          if (session !== generation || !ready) return;
+          const objectUrl = URL.createObjectURL(blob);
+          const link = node('a');
+          link.href = objectUrl;
+          link.download = attachment.name;
+          document.body.append(link);
+          try { link.click(); }
+          finally { link.remove(); setTimeout(() => URL.revokeObjectURL(objectUrl), 1000); }
+        } catch (error) {
+          if (session === generation && error.name !== 'AbortError') showError(error.message);
+        } finally {
+          if (session === generation) download.disabled = !ready || busy;
+        }
+      });
+      root.append(download);
+    }
     $('message-list').append(root);
     messageCards.set(message.id, { root, sender, recipient, message });
   }
