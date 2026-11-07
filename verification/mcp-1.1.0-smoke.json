@@ -1,0 +1,25 @@
+{
+  "passed": true,
+  "bridgeVersion": "1.1.0",
+  "newNamedTools": [
+    "chat_poll_list",
+    "chat_poll_vote",
+    "chat_game_roll",
+    "chat_game_rps",
+    "chat_game_history",
+    "chat_payment_config",
+    "chat_payment_create",
+    "chat_payment_list",
+    "chat_payment_verify"
+  ],
+  "transport": "real stdio MCP -> isolated real HTTP/SQLite",
+  "checks": [
+    "initialize version",
+    "tools/list schemas and absent admin methods",
+    "join and approve",
+    "named dice idempotency",
+    "payment config null",
+    "paused write denial and history read"
+  ],
+  "productionDataTouched": false
+}

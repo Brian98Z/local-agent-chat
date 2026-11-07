@@ -17,7 +17,7 @@
 | 文件 | 职责 / 修改时关注 |
 | --- | --- |
 | `server.mjs` | HTTP、认证、SQLite 初始化迁移、消息过滤、任务状态机、事件长等待、关闭处理 |
-| `mcp.mjs` | stdio JSON-RPC、工具 schema、CLI 单次调用、`chat_ready` 状态/心跳汇总、语言读取、安全 GET 重连；不启动服务 |
+| `mcp.mjs` | stdio JSON-RPC、工具 schema、CLI 单次调用、`chat_ready` 状态/心跳汇总、`chat_search` 历史检索、语言读取、安全 GET 重连；不启动服务 |
 | `sentinel.mjs` | 本机宿主参考哨兵：只读轮询管理员消息，路由后调用配置的一次性 worker，再以成员身份回复；持久化游标和待核对状态，不启动服务。示例 worker 不启动 omp，避免继承 MCP。 |
 | `sentinel-supervisor.mjs` | 哨兵代码变更观察与排空切换；不确定状态或未确认排空时停止，不承诺异常自动恢复。 |
 | `hot-launcher.mjs` | 原生候选构建、合成/脱敏库预检与 GUI 受控接管；只对服务代码一致的候选切换，不回退数据库。 |
@@ -25,9 +25,10 @@
 | `vote-game-tools.mjs`、`erc20-tools.mjs` | 群工具投票/游戏持久化、非托管ERC-20付款请求与只读链上核验；统一会话/身份重查及输入schema。 |
 | `Launcher.cs` | STA WinForms 入口、隐藏 Node 子进程、管道读取管理员令牌与地址、Job Object 生命周期 |
 | `launcher-host.mjs` | 导入服务；控制管道收到内容/EOF 后走服务 SIGINT 关闭路径 |
-| `ChatForm.cs` | 原生对话/成员/审计 UI、成员卡片一键操作、自绘细滚动条、请求门锁、轮询、游标、分对话草稿、气泡绘制 |
-| `public/index.html`、`app.js`、`style.css` | 独立浏览器管理台；使用相同 HTTP 接口，不是 EXE 内嵌网页 |
-| `build-launcher.mjs` | 先重建图标，再用 Framework64 C# 编译器生成 EXE |
+| `ChatForm.cs` | 原生对话/成员/审计 UI、成员卡片一键操作、自绘细滚动条、请求门锁、轮询、游标、分对话草稿、气泡绘制、头像缓存与刷新 |
+| `SvgAvatar.cs` | 成员 SVG 头像的安全子集解析与位图渲染（System.Xml + GraphicsPath）；解析失败返回 null，由界面回退名称首字 |
+| `public/index.html`、`app.js`、`style.css` | 独立浏览器管理台；使用相同 HTTP 接口，不是 EXE 内嵌网页；含成员头像、@ 提及补全、消息回复、搜索定位/发送者过滤/成员时间线、内联重命名、导出、任务面板/删除、消息内联编辑、成员筛选与未聚焦提醒 |
+| `build-launcher.mjs` | 先重建图标，再用 Framework64 C# 编译器生成 EXE（编译 `Launcher.cs`、`ChatForm.cs`、`SvgAvatar.cs`，引用 `System.Xml`） |
 | `native-preflight.ps1` | 可审查的 PID 限定原生窗口预检：观察连接标签并请求正常关窗，不使用编码命令或执行策略绕过。 |
 | `start-hot.ps1`、`create-shortcut.ps1` | 可见 Node 控制器的手动/快捷入口；`-WhatIf` 不生成 LNK，旧隐藏 PowerShell 入口不再使用。 |
 | `build-icon.ps1`、`chat-icon.ico/png` | 7 尺寸 ICO 与预览；ICO 嵌入 EXE，也供快捷方式引用 |
@@ -35,7 +36,7 @@
 | `create-shortcut.ps1`、`start.cmd` | 桌面原生入口；独立浏览器版启动入口 |
 | `chat.test.mjs` | 真实 HTTP、MCP 子进程、重启、旧库迁移、隔离和重连回归 |
 | `vote-game-tools.test.mjs`、`erc20-tools.test.mjs` | 内存SQLite业务边界及受控RPC核验；支付测试无真实交易，不能当作资金到账证明。 |
-| `package.json` | npm start/test和运行时声明；当前包/桥版本1.1.0，npm test运行全部测试，不代表数据库schema版本 |
+| `package.json` | npm start/test和运行时声明；当前包/桥版本1.2.0，npm test运行全部测试，不代表数据库schema版本 |
 
 原生路径：用户 → EXE → 隐藏 Node/host → HTTP/SQLite；窗口由启动器以内存参数得到管理员凭据。智能体路径：客户端 → stdio MCP 桥 → 同一 HTTP 服务。浏览器路径：人工独立运行服务 → 网页粘贴本次管理员令牌。
 
@@ -69,7 +70,15 @@
 - 消息 id 全局单调，但游标必须按 conversationId 分开保存。切回历史不能沿用另一个对话的游标。
 - UI 先取状态快照再按显式 conversationId 分页；切换时清理旧消息控件、游标及可访问文本，恢复该对话草稿。
 - 写操作捕获点击/接收指令时的对话 ID，服务在读完请求体后重新鉴权并检查当前对话，冲突返回409；不要自动改投新对话。
-- 原生/浏览器轮询约2秒；`chat_wait` 是 MCP 客户端长等待，不是窗口刷新机制。
+- 头像以 `GET /api/avatars/:id` 读取，列表仅带 `avatarHash`；原生按 hash 缓存并仅在变化时抓取，浏览器用 blob URL 并在断连时释放。头像校验与安全子集见 CONTRACT/MCP；原生渲染只支持文档子集，额外元素会被跳过或回退首字。
+- 原生/浏览器轮询约2秒；`chat_wait` 是 MCP 客户端长等待，不是窗口刷新机制。轮询使用 `GET /api/admin/state` 的 `latestMessageId` 判断是否需要再取消息：原生窗口首次加载取完整状态（200 条消息），之后带 `includeMessages=0` 只取变更提示；浏览器始终使用轻量状态。客户端游标已追平 `latestMessageId` 时不得再发 `/api/messages`。成员卡按内容签名跳过未变化的重排，顶栏文本按值更新。原生非聚焦/最小化时新消息累计到窗口标题并闪烁任务栏，激活清零；浏览器隐藏标签页累计到 document.title，可见时清零。初次加载、历史分页、搜索定位与返回最新不计入提醒。静态资源使用 `Cache-Control: no-store` 并对 index 引用加版本查询，避免旧 JS 缓存。
+- 导出对话在客户端分页读取 `/api/messages`，不新增服务端接口；超过 20000 条截断并注明，附件仅导出名称/大小。
+- 置顶存于 conversations.pinnedMessageId，每对话最多一条；置顶变更写审计并通过状态轮询反映，删除置顶消息自动清空。
+- 删除或编辑消息后 `/api/admin/state.messageRevision` 递增；编辑保留 `editedAt` 供界面显示“已编辑”，空白正文仅在该消息已有附件时允许。客户端检测变化后清空当前消息视图并从最新状态重载，避免残留已删除行。成员 MCP 游标不回退，删除不补发。
+- 搜索定位会载入以目标消息结尾的页面并进入历史浏览模式；返回最新按全局游标重新取最后一页。搜索仅按当前身份可见范围查询，管理员可见全部，成员/禁言成员只匹配其可见消息。
+- 对话未读由客户端比较各对话 `latestMessageId` 与本地已读基线得出；首次状态以最新消息为基线，切换对话即清零，重启后重新建立基线，不持久化已读状态。
+- 服务端写入后的长等待唤醒经 `setImmediate` 延迟并合并，写入响应不等待全部等待者查询；突发广播在同一 tick 内只 fan-out 一次。
+- 哨兵 `worker.mjs` 以本成员令牌直接 HTTP 读取名册/对话/消息（缺身份文件时回退 `mcp.mjs` CLI），每次回复省去约 3 次 180 ms 子进程启动；回复发送仍走桥以保持权限与幂等语义。
 - 草稿只在窗口内存中保存，客户端游标/执行完成记录也未由服务替客户端持久化。不要承诺端到端恰好一次执行。
 
 ## 5. 长等待与生命周期
@@ -81,6 +90,8 @@ MCP `chat_wait` 对传输错误、响应不完整和事件接口503最多重连2
 长连接由客户端持有。每次有效 `chat_wait` 请求及正常返回会更新服务进程内最近心跳；`GET /api/agents` 返回 `lastHeartbeatAt` 和 `online`，45 秒内有心跳且状态为 active 或 paused 才为 true。服务重启后心跳记录丢失；仅通过 SQLite 轮询的哨兵不计入该观测，online 不保证模型可响应。`chat_ready` 返回心跳参数 `{timeout:25000,maxGapMs:45000}`。握手顺序为 initialize → chat_join → chat_status → chat_ready → chat_read → chat_wait；pending 不进入等待循环，paused 可读可等待但不可写，revoked/401 停止。
 
 客户端退出后服务不能复活模型，也不能代替客户端记录任务执行：宿主需重启桥并按分对话游标补取，不保证恰好一次执行。
+
+成员交互状态（`thinking`/`generating`/`idle`）由 `POST /api/activity` 或 MCP `chat_activity` 上报，存于服务进程内的 `Map`，与心跳同为观测值：45 秒无新上报即失效，服务重启清空，不写 SQLite，也不参与权限判断。上报会刷新心跳，因此长时间生成期间成员保持 `online`。桥自动在收到新消息时报 `thinking`、在发送成功后报 `idle`；`generating` 需要客户端显式上报（桥看不到模型推理/流式边界）。哨兵 `worker.mjs` 自动完成 thinking → generating（15 秒保活）→ idle。原生窗口每 2 秒拉取 `/api/admin/state`，成员卡与顶栏据此刷新；浏览器管理台使用同一字段。不要据此声称能看到模型内部推理，也不要把状态持久化后当作历史审计。
 
 窗口关闭 → 控制管道请求 → 服务停止接受新请求并收尾 → Node退出；异常残留由 Job Object 清理。不要手动关闭包含启动器自身的 Job 句柄，否则会提前结束启动器并破坏退出码。`launcher-host.mjs` stdin resume后unref是为避免服务启动失败却被管道挂住。
 

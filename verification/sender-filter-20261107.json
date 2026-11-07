@@ -1,0 +1,25 @@
+{
+  "feature": "message search sender filter",
+  "date": "2026-11-07",
+  "exeSha256": "cbb1da090ff1e40591358894face822b943f600e0da4a77d1c7662b272959fec",
+  "serverTests": "node --test: 85/85 passed",
+  "protocol": {
+    "http": "GET /api/messages/search?q=&from=",
+    "mcp": "chat_search {q, conversationId?, limit?, from?}",
+    "from": "admin or a member UUID; applies on top of identity visibility",
+    "validation": "unknown/repeated parameters 400, invalid from 400; response echoes from"
+  },
+  "native": {
+    "method": "temporary harness opened the search window, selected a member sender and searched",
+    "observed": "2 matching member messages, first sender 筛选成员; results use the existing search list and jump path",
+    "ui": "search bar adds a sender dropdown (全部成员/管理员/成员)"
+  },
+  "web": {
+    "method": "headless browser with the sender select",
+    "observed": "member filter returned only the member's message; switching to 管理员 returned only the admin message"
+  },
+  "notes": [
+    "visibility filtering still applies before the sender filter",
+    "formal data dir and daily instance were not modified"
+  ]
+}

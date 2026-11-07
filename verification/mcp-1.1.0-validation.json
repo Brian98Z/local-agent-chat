@@ -1,0 +1,20 @@
+{
+  "bridgeVersion": "1.1.0",
+  "fullSuite": {
+    "command": "node --test",
+    "tests": 70,
+    "pass": 70,
+    "fail": 0,
+    "skipped": 0,
+    "durationMs": 99502.5599
+  },
+  "documentation": {
+    "jsonBlocks": 9,
+    "namedExamplesMatchSchemas": true,
+    "desktopPath": "C:/Users/此言/Desktop/Agent本地聊天室-MCP连接文档.md",
+    "sha256": "1c282f7737ca78795cc1eda28d19c8d79dba4bfc4a24fb6ff2d46e93959a62c3",
+    "byteEqual": true
+  },
+  "runtime": "Only isolated smoke/test services started; user connections and production data unchanged",
+  "priorReleaseZipUpdated": false
+}

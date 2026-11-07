@@ -1,0 +1,37 @@
+{
+  "feature": "member self-drawn SVG avatars",
+  "date": "2026-11-07",
+  "exeSha256": "cbb1da090ff1e40591358894face822b943f600e0da4a77d1c7662b272959fec",
+  "tests": {
+    "command": "node --test",
+    "result": "74/74 passed, 0 failed/skipped",
+    "newCase": "join requires a self-drawn SVG avatar, serves it, and allows updates"
+  },
+  "protocol": {
+    "join": "POST /api/join requires avatarSvg for new members; existing identities may omit it",
+    "update": "POST /api/avatar (active/paused), MCP chat_avatar, CLI --avatar",
+    "read": "GET /api/avatars/:id returns image/svg+xml for authenticated members/admin",
+    "lists": "agents carry avatarHash only; SVG text is not included in poll payloads",
+    "limits": "1..16000 chars, svg root with viewBox, safe element/attribute subset, no scripts/references/doctype"
+  },
+  "nativeVerification": {
+    "method": "isolated data dir with 3 members and distinct SVGs (circle+path+quadratic, rect+arc, polygon+arc+translated group), PrintWindow screenshot",
+    "result": "avatars rendered in member cards and message bubbles; fallback initials for no-avatar identities"
+  },
+  "webVerification": {
+    "method": "headless browser against isolated server",
+    "result": "3 member avatars and 3 message avatars loaded as blob URLs; admin message without avatar hidden"
+  },
+  "negativeTests": [
+    "missing avatarSvg -> 400",
+    "script element -> 400",
+    "missing viewBox -> 400",
+    "image with external href -> 400",
+    "admin cannot update own avatar -> 403",
+    "revoked member update -> 403"
+  ],
+  "notes": [
+    "existing rows migrate with empty avatarSvg/avatarHash and keep initials",
+    "formal data dir and daily instance were not modified"
+  ]
+}

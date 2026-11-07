@@ -1,0 +1,17 @@
+﻿{
+    "WorkingDirectory":  "D:/OMP/project/local-agent-chat-release-grouptools-audit-20261101",
+    "CompiledButtons":  {
+                            "GroupToolsButton":  "群工具",
+                            "AttachmentButton":  "附件"
+                        },
+    "Passed":  true,
+    "Shortcut":  "C:\\Users\\此言\\Desktop\\Agent 本地聊天室.lnk",
+    "CompiledFeatures":  {
+                             "ShowGroupToolsAsync":  true,
+                             "ShowScoringAsync":  true
+                         },
+    "Target":  "D:\\OMP\\project\\local-agent-chat-release-grouptools-audit-20261101\\LocalAgentChat.exe",
+    "Arguments":  "--port 4317 --data-dir \"D:\\OMP\\project\\local-agent-chat\\data\"",
+    "ExistingWindowChanged":  false,
+    "NewApplicationLaunched":  false
+}

@@ -1,0 +1,25 @@
+{
+  "feature": "unfocused new-message attention and static cache fix",
+  "date": "2026-11-07",
+  "exeSha256": "cbb1da090ff1e40591358894face822b943f600e0da4a77d1c7662b272959fec",
+  "serverTests": "node --test: 78/78 passed (only static Cache-Control changed)",
+  "native": {
+    "method": "harness connected to a real isolated server, minimized the form, then POSTed a message via HTTP; poll appended it",
+    "observed": "title became 智能体本地聊天室 (1); ClearAttention restored 智能体本地聊天室",
+    "behavior": "taskbar flash via FlashWindowEx (FLASHW_TRAY|FLASHW_TIMERNOFG), count increments while unfocused/minimized"
+  },
+  "web": {
+    "method": "headless browser with an init script that makes the page report hidden, then a new message was POSTed",
+    "observed": "document.title became (1) 本地协作室 · 管理台",
+    "behavior": "hidden-tab counts increment; visibilitychange resets; history/search jumps do not count"
+  },
+  "cacheFix": {
+    "server": "static files now send Cache-Control: no-store",
+    "index": "app.js/style.css URLs carry a version query",
+    "reason": "browser was executing stale app.js after updates"
+  },
+  "notes": [
+    "initial load, history paging, search jump and return-to-latest are excluded from attention counts",
+    "formal data dir and daily instance were not modified"
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "feature": "member @mention autocomplete",
+  "date": "2026-11-07",
+  "exeSha256": "cbb1da090ff1e40591358894face822b943f600e0da4a77d1c7662b272959fec",
+  "serverTests": "node --test: 74/74 passed (server unchanged by this feature)",
+  "native": {
+    "method": "temporary harness compiled with ChatForm.cs + SvgAvatar.cs; form shown, one active AgentData injected, message input focused",
+    "observed": "focused=true visible=true items=1 first=布局测试; after insert text=[@布局测试 ] caret=6 menuVisible=false"
+  },
+  "web": {
+    "method": "headless browser, real keyboard input into #message-text",
+    "observed": "menu visible with item 布局测试; Enter inserted @布局测试 and closed the menu; no newline or accidental send"
+  },
+  "behavior": [
+    "suggestions come only from active members, sorted, max 6",
+    "ArrowUp/ArrowDown selects, Enter/Tab inserts, Escape closes, mouse click inserts",
+    "Enter is not forwarded to sending while the menu is open",
+    "menu hides on focus loss, conversation switch, send, or disconnect",
+    "server mention parsing and sentinel priority unchanged; @ does not change visibility or permissions"
+  ],
+  "notes": [
+    "no server schema or protocol change",
+    "formal data dir and daily instance were not modified"
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "feature": "member chat performance",
+  "date": "2026-11-07",
+  "exeSha256": "cbb1da090ff1e40591358894face822b943f600e0da4a77d1c7662b272959fec",
+  "tests": "node --test: 73/73 passed",
+  "dataset": "34 members, 200 historical messages, medium-length Chinese text, isolated data dir",
+  "server": {
+    "stateBytes": { "before": 121491, "afterLightweight": 17532 },
+    "stateLatencyMs": { "beforeAvg": 5.99, "afterLightweightAvg": 2.51 },
+    "pollAfterCursorMs": { "avg": 1.51, "p95": 1.86 },
+    "serialSendMs": { "avg": 3.23, "p95": 4.2 },
+    "broadcastTo20WaitersMs": 13.61,
+    "note": "wake fan-out deferred with setImmediate and coalesced; sender no longer waits synchronously for each waiter"
+  },
+  "nativeClient": {
+    "idlePollMs": { "before": "21-28", "after": "6" },
+    "renderMs": { "before": "13-15", "after": "4-6" },
+    "activePollMs": { "before": "49-74", "after": "37-68" },
+    "measurement": "CHAT_PERF_LOG=1 phase logs from isolated EXE; same 34 members/200+ messages"
+  },
+  "worker": {
+    "endToEndMs": { "before": 1120.1, "after": 329.8 },
+    "modelMs": 100,
+    "measurement": "real agent-chat-sentinel/worker.mjs + local mock OpenAI-compatible provider, 200 messages, 1 identity",
+    "change": "direct HTTP reads with member token instead of 3x mcp.mjs CLI spawn (~180ms each); CLI fallback when identity file is absent"
+  },
+  "limits": [
+    "layout/repaint for newly appended message rows remains the dominant native-client cost under continuous chat",
+    "synchronous=FULL WAL durability was intentionally left unchanged",
+    "formal data and daily instance were not modified or started"
+  ]
+}

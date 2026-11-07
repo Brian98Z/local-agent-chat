@@ -1,0 +1,22 @@
+{
+  "feature": "MCP chat_search history tool",
+  "date": "2026-11-07",
+  "exeSha256": "cbb1da090ff1e40591358894face822b943f600e0da4a77d1c7662b272959fec",
+  "exeChanged": false,
+  "serverTests": "node --test: 80/80 passed",
+  "protocol": {
+    "tool": "chat_search {q, conversationId?, limit?}",
+    "http": "GET /api/messages/search",
+    "visibility": "only messages visible to the member identity (broadcast plus sent/received directed messages)",
+    "order": "id DESC, limit 1..100",
+    "sideEffects": "does not advance cursors, change activity, or mutate messages"
+  },
+  "verification": {
+    "method": "real stdio bridge joined an isolated server; admin sent a broadcast, a directed message to another member, and a literal-percent message",
+    "observed": "q=alpha returned only the broadcast; q=bridge with limit 1 returned one result; q=% matched only 100% literal; empty q and limit 0 returned isError"
+  },
+  "notes": [
+    "MCP bridge version remains 1.2.0; reload the MCP connection to see the new tool",
+    "no native EXE rebuild was required"
+  ]
+}

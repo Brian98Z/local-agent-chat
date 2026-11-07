@@ -1,0 +1,24 @@
+{
+  "feature": "service health panel",
+  "date": "2026-11-07",
+  "exeSha256": "cbb1da090ff1e40591358894face822b943f600e0da4a77d1c7662b272959fec",
+  "serverTests": "node --test: 86/86 passed",
+  "protocol": {
+    "endpoint": "GET /api/admin/health",
+    "fields": "version, node, uptimeSeconds, port, databaseBytes, walBytes, messageRevision, counts (agents/messages/tasks/conversations/attachments), memory (rss/heapUsed)",
+    "access": "admin only; no tokens, message text or file paths"
+  },
+  "native": {
+    "method": "temporary harness fetched health through the form",
+    "observed": "version=1.2.0 node=v22.19.0 messages=1 tasks=1 agents=0 bytes=4096",
+    "ui": "header 状态 button opens a text status window with refresh/close; seven-button header screenshot checked"
+  },
+  "web": {
+    "method": "headless browser clicked 服务状态",
+    "observed": "panel showed version/node/port/uptime/database/WAL/revision/counts/memory and action-status 服务状态已刷新。"
+  },
+  "notes": [
+    "counts are live SQLite table counts; databaseBytes and walBytes are current file sizes",
+    "formal data dir and daily instance were not modified"
+  ]
+}

@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,8 @@ import { registerERC20Tools } from './erc20-tools.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const MAX_BODY_BYTES = 64 * 1024;
+let packageVersion = 'unknown';
+try { packageVersion = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version || 'unknown'; } catch { /* keep unknown */ }
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/i;
 const AGENT_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const STATIC_FILES = new Map([
@@ -77,6 +79,26 @@ function text(value, field, minimum, maximum, trim = false) {
 function agentId(value) {
   if (typeof value !== 'string' || !AGENT_ID_PATTERN.test(value)) fail(400, 'Invalid agent id.');
   return value;
+}
+
+const AVATAR_MAX_CHARS = 16000;
+const AVATAR_UNSUPPORTED = /<\s*(?:script|foreignObject|image|use|a|animate|animateTransform|set|style|iframe|object|embed|audio|video|filter|mask|pattern|text|tspan)\b/i;
+function validateAvatar(value) {
+  const svg = text(value, 'avatarSvg', 1, AVATAR_MAX_CHARS);
+  if (/<!DOCTYPE|<!ENTITY/i.test(svg)) fail(400, 'avatarSvg must not contain a DOCTYPE or entities.');
+  if (!/^\s*(?:<\?xml[^>]*\?>\s*)?<svg[\s>]/i.test(svg)) fail(400, 'avatarSvg must start with an <svg> element.');
+  if (!/<\/svg\s*>\s*$/i.test(svg)) fail(400, 'avatarSvg must end with </svg>.');
+  if (!/<svg[^>]*\bviewBox\s*=/i.test(svg)) fail(400, 'avatarSvg requires a viewBox attribute.');
+  if ((svg.match(/<[a-zA-Z]/g) || []).length > 200) fail(400, 'avatarSvg contains too many elements.');
+  if ((svg.match(/<g[\s>]/gi) || []).length > 32) fail(400, 'avatarSvg nests too many groups.');
+  if (AVATAR_UNSUPPORTED.test(svg)) fail(400, 'avatarSvg contains an unsupported element.');
+  if (/\son[a-z-]+\s*=/i.test(svg)) fail(400, 'avatarSvg must not contain event handlers.');
+  if (/\b(?:href|xlink:href|src)\s*=/i.test(svg)) fail(400, 'avatarSvg must not contain references.');
+  if (/javascript:|url\s*\(|@import|expression\s*\(/i.test(svg)) fail(400, 'avatarSvg contains an unsafe value.');
+  return svg;
+}
+function avatarHash(svg) {
+  return createHash('sha256').update(svg, 'utf8').digest('hex').slice(0, 16);
 }
 
 function integer(value, field, minimum, maximum) {
@@ -267,8 +289,20 @@ function start(config) {
     if (!db.prepare('PRAGMA table_info(messages)').all().some((column) => column.name === 'clientPayload')) {
       db.exec('ALTER TABLE messages ADD COLUMN clientPayload TEXT');
     }
+    if (!db.prepare('PRAGMA table_info(messages)').all().some((column) => column.name === 'editedAt')) {
+      db.exec('ALTER TABLE messages ADD COLUMN editedAt TEXT');
+    }
+    if (!db.prepare('PRAGMA table_info(conversations)').all().some((column) => column.name === 'pinnedMessageId')) {
+      db.exec('ALTER TABLE conversations ADD COLUMN pinnedMessageId INTEGER');
+    }
     if (!db.prepare('PRAGMA table_info(agents)').all().some((column) => column.name === 'model')) {
       db.exec("ALTER TABLE agents ADD COLUMN model TEXT NOT NULL DEFAULT ''");
+    }
+    if (!db.prepare('PRAGMA table_info(agents)').all().some((column) => column.name === 'avatarSvg')) {
+      db.exec("ALTER TABLE agents ADD COLUMN avatarSvg TEXT NOT NULL DEFAULT ''");
+    }
+    if (!db.prepare('PRAGMA table_info(agents)').all().some((column) => column.name === 'avatarHash')) {
+      db.exec("ALTER TABLE agents ADD COLUMN avatarHash TEXT NOT NULL DEFAULT ''");
     }
     db.exec(`
       CREATE TABLE IF NOT EXISTS attachments (
@@ -328,13 +362,20 @@ function start(config) {
       throw error;
     }
   }
-  const publicAgent = (row) => ({ id: row.id, name: row.name, status: row.status, model: row.model, createdAt: row.createdAt });
-  const getAgent = (id) => sql('SELECT id,name,status,model,createdAt FROM agents WHERE id = ?').get(id);
+  const publicAgent = (row) => ({ id: row.id, name: row.name, status: row.status, model: row.model, createdAt: row.createdAt, avatarHash: row.avatarHash || '' });
+  const setAvatar = (id, svg) => sql('UPDATE agents SET avatarSvg = ?, avatarHash = ? WHERE id = ?').run(svg, avatarHash(svg), id);
+  const getAgent = (id) => sql('SELECT id,name,status,model,createdAt,avatarHash FROM agents WHERE id = ?').get(id);
   const getTask = (id) => sql('SELECT * FROM tasks WHERE id = ?').get(id);
   const allTasks = (conversationId) => sql('SELECT * FROM tasks WHERE conversationId = ? ORDER BY id').all(conversationId);
   const audit = (actor, action, target, now) => sql('INSERT INTO audit (actor,action,target,createdAt) VALUES (?,?,?,?)').run(actor, action, String(target), now);
   const getConversation = (id) => sql('SELECT id,title,createdAt FROM conversations WHERE id = ?').get(id);
-  const allConversations = () => sql('SELECT id,title,createdAt FROM conversations ORDER BY id DESC').all();
+  const allConversations = (actor) => {
+    if (actor && actor.admin) return sql('SELECT c.id,c.title,c.createdAt,c.pinnedMessageId,COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.conversationId = c.id),0) AS latestMessageId FROM conversations c ORDER BY c.id DESC').all();
+    return sql(`SELECT c.id,c.title,c.createdAt,
+      COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.conversationId = c.id AND ((m."to" IS NULL AND m.toAdmin = 0) OR m."to" = ? OR m."from" = ?)),0) AS latestMessageId,
+      CASE WHEN c.pinnedMessageId IS NOT NULL AND EXISTS (SELECT 1 FROM messages p WHERE p.id = c.pinnedMessageId AND p.conversationId = c.id AND ((p."to" IS NULL AND p.toAdmin = 0) OR p."to" = ? OR p."from" = ?)) THEN c.pinnedMessageId ELSE NULL END AS pinnedMessageId
+      FROM conversations c ORDER BY c.id DESC`).all(actor.id, actor.id, actor.id, actor.id);
+  };
   const activeConversationId = () => sql('SELECT activeConversationId FROM conversation_state WHERE id = 1').get().activeConversationId;
 
   function readConversationId(searchParams) {
@@ -434,16 +475,47 @@ function start(config) {
   }
 
   const eventWaiters = new Set();
+  let wakeScheduled = false;
   // Heartbeats are process-local observations, not persisted presence claims.
   const heartbeats = new Map();
   const heartbeatMaxGapMs = 45000;
+  // Member-declared interaction states. Memory-only and short-lived so a crashed
+  // client cannot keep claiming "thinking" after its reports stop.
+  const activities = new Map();
+  const activityMaxGapMs = 45000;
+  const activityStates = ['thinking', 'generating', 'idle'];
+  function currentActivity(agentId, now) {
+    const entry = activities.get(agentId);
+    if (!entry || now - entry.at > activityMaxGapMs) return null;
+    return { state: entry.state, detail: entry.detail, at: new Date(entry.at).toISOString() };
+  }
+  function withPresence(agent, now) {
+    const last = heartbeats.get(agent.id);
+    const activity = currentActivity(agent.id, now);
+    const memberStatus = agent.status === 'active' || agent.status === 'paused';
+    return {
+      ...agent,
+      lastHeartbeatAt: last === undefined ? null : new Date(last).toISOString(),
+      online: memberStatus && ((last !== undefined && now - last <= heartbeatMaxGapMs) || activity !== null),
+      activity,
+    };
+  }
   function wakeEventWaiters() {
-    for (const wake of eventWaiters) wake();
+    // Fan-out runs after the write response so a sender never waits for every waiter.
+    // Bursts coalesce into one wake per waiter within the same tick.
+    if (wakeScheduled) return;
+    wakeScheduled = true;
+    setImmediate(() => {
+      wakeScheduled = false;
+      for (const wake of eventWaiters) wake();
+    });
   }
 
   const adminToken = randomBytes(32).toString('hex');
   const adminHash = Buffer.from(tokenHash(adminToken), 'hex');
   let registrationOpen = sql("SELECT value FROM settings WHERE key = 'registrationOpen'").get()?.value === '1';
+  // In-memory revision bumps when message history is mutated (deletions). Clients reload on change.
+  let messageRevision = 0;
   let actualPort;
   let stopping = false;
 
@@ -458,7 +530,7 @@ function start(config) {
       if (requirement === 'agent') fail(403, 'An agent identity is required.');
       return { id: 'admin', admin: true };
     }
-    const row = sql('SELECT id,name,status,model,createdAt FROM agents WHERE tokenHash = ?').get(hash);
+    const row = sql('SELECT id,name,status,model,createdAt,avatarHash FROM agents WHERE tokenHash = ?').get(hash);
     if (!row) fail(401, 'A valid bearer token is required.');
     if (requirement === 'admin') fail(403, 'Administrator authorization is required.');
     // Muted (paused) members keep read access; only active members may write.
@@ -554,31 +626,38 @@ function start(config) {
       } catch {
         fail(503, 'Web interface is unavailable.');
       }
-      response.writeHead(200, { 'Content-Type': contentType, 'Content-Length': bytes.length });
+      response.writeHead(200, { 'Content-Type': contentType, 'Content-Length': bytes.length, 'Cache-Control': 'no-store' });
       response.end(method === 'HEAD' ? undefined : bytes);
       return;
     }
 
     if (path === '/api/join' && method === 'POST') {
       const body = await jsonBody(request);
-      fields(body, ['name', 'token', 'model'], ['name', 'token', 'model']);
+      fields(body, ['name', 'token', 'model', 'avatarSvg'], ['name', 'token', 'model']);
       const name = text(body.name, 'name', 1, 64, true);
       const model = text(body.model, 'model', 1, 80, true);
+      const avatarSvg = Object.hasOwn(body, 'avatarSvg') ? validateAvatar(body.avatarSvg) : '';
       if (typeof body.token !== 'string' || !TOKEN_PATTERN.test(body.token)) fail(400, 'token must be 64 hexadecimal characters.');
       const hash = tokenHash(body.token);
-      const existing = sql('SELECT id,name,status,model,createdAt FROM agents WHERE tokenHash = ?').get(hash);
+      const existing = sql('SELECT id,name,status,model,createdAt,avatarHash FROM agents WHERE tokenHash = ?').get(hash);
       if (existing) {
-        // The model declaration is fixed after the first successful registration.
-        if (!existing.model) sql('UPDATE agents SET model = ? WHERE id = ?').run(model, existing.id);
+        // Revoked identities cannot write through re-join; only approved/muted members may update their avatar.
+        const canUpdate = existing.status === 'active' || existing.status === 'paused';
+        if (!existing.model && existing.status !== 'revoked') sql('UPDATE agents SET model = ? WHERE id = ?').run(model, existing.id);
+        if (avatarSvg && canUpdate) {
+          setAvatar(existing.id, avatarSvg);
+          audit(existing.id, 'agent.avatar', existing.id, new Date().toISOString());
+        }
         return send(response, 200, { agent: publicAgent(getAgent(existing.id)) });
       }
+      if (!avatarSvg) fail(400, 'New members must provide an SVG avatar in avatarSvg.');
+      if (!registrationOpen) fail(403, 'New registration is closed.');
       const nameKey = name.toLowerCase();
       if (sql('SELECT id FROM agents WHERE nameKey = ?').get(nameKey)) fail(409, 'Name is already registered.');
-      if (!registrationOpen) fail(403, 'New registration is closed.');
       const now = new Date().toISOString();
       const id = randomUUID();
       transaction(() => {
-        sql("INSERT INTO agents (id,name,nameKey,tokenHash,status,model,createdAt) VALUES (?,?,?,?,'pending',?,?)").run(id, name, nameKey, hash, model, now);
+        sql("INSERT INTO agents (id,name,nameKey,tokenHash,status,model,createdAt,avatarSvg,avatarHash) VALUES (?,?,?,?,'pending',?,?,?,?)").run(id, name, nameKey, hash, model, now, avatarSvg, avatarHash(avatarSvg));
         audit(id, 'agent.join', id, now);
       });
       return send(response, 201, { agent: getAgent(id) });
@@ -588,9 +667,56 @@ function start(config) {
       return send(response, 200, { agent: publicAgent(authenticate(request, 'agent')) });
     }
 
-    if (path === '/api/conversations' && method === 'GET') {
+    if (path === '/api/avatar' && method === 'POST') {
+      const actor = authenticate(request, 'member');
+      if (actor.admin) fail(403, 'An agent identity is required.');
+      const body = await jsonBody(request);
+      fields(body, ['avatarSvg'], ['avatarSvg']);
+      const svg = validateAvatar(body.avatarSvg);
+      setAvatar(actor.id, svg);
+      audit(actor.id, 'agent.avatar', actor.id, new Date().toISOString());
+      return send(response, 200, { avatarHash: avatarHash(svg) });
+    }
+
+    if (path.startsWith('/api/avatars/') && method === 'GET') {
       authenticate(request, 'member');
-      return send(response, 200, { conversations: allConversations(), activeConversationId: activeConversationId() });
+      const match = /^\/api\/avatars\/([0-9a-f-]{36})$/.exec(path);
+      if (!match) fail(404, 'Avatar not found.');
+      const row = sql('SELECT avatarSvg FROM agents WHERE id = ?').get(match[1]);
+      if (!row || !row.avatarSvg) fail(404, 'Avatar not found.');
+      const bytes = Buffer.from(row.avatarSvg, 'utf8');
+      response.writeHead(200, {
+        'Content-Type': 'image/svg+xml; charset=utf-8',
+        'Content-Length': bytes.length,
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'private, no-cache',
+      });
+      response.end(request.method === 'HEAD' ? undefined : bytes);
+      return;
+    }
+
+    if (path === '/api/pinned' && method === 'GET') {
+      const actor = authenticate(request, 'member');
+      for (const key of url.searchParams.keys()) {
+        if (key !== 'conversationId') fail(400, 'Unknown pinned parameter.');
+        if (url.searchParams.getAll(key).length > 1) fail(400, 'Repeated conversationId parameter.');
+      }
+      const conversationId = readConversationId(url.searchParams);
+      const row = sql('SELECT pinnedMessageId FROM conversations WHERE id = ?').get(conversationId);
+      const pinnedId = row && row.pinnedMessageId ? row.pinnedMessageId : null;
+      let pinnedMessage = null;
+      if (pinnedId) {
+        const projection = 'SELECT id,"from",CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to",text,createdAt,toAdmin,editedAt FROM messages WHERE id = ? AND conversationId = ?';
+        pinnedMessage = actor.admin
+          ? sql(projection).get(pinnedId, conversationId) || null
+          : sql(projection + ' AND (("to" IS NULL AND toAdmin = 0) OR "to" = ? OR "from" = ?)').get(pinnedId, conversationId, actor.id, actor.id) || null;
+      }
+      return send(response, 200, { conversationId, pinnedMessage });
+    }
+
+    if (path === '/api/conversations' && method === 'GET') {
+      const actor = authenticate(request, 'member');
+      return send(response, 200, { conversations: allConversations(actor), activeConversationId: activeConversationId() });
     }
 
     if (path === '/api/admin/conversations' && method === 'POST') {
@@ -608,6 +734,24 @@ function start(config) {
       });
       wakeEventWaiters();
       return send(response, 201, { conversation, activeConversationId: conversation.id });
+    }
+
+    const renameConversationMatch = /^\/api\/admin\/conversations\/([^/]+)\/rename$/.exec(path);
+    if (renameConversationMatch && method === 'POST') {
+      authenticate(request, 'admin');
+      const id = integer(renameConversationMatch[1], 'conversation id', 1, Number.MAX_SAFE_INTEGER);
+      const body = await jsonBody(request);
+      authenticate(request, 'admin');
+      fields(body, ['title'], ['title']);
+      const title = text(body.title, 'title', 1, 80, true);
+      const conversation = transaction(() => {
+        if (!getConversation(id)) fail(404, 'Conversation not found.');
+        sql('UPDATE conversations SET title = ? WHERE id = ?').run(title, id);
+        audit('admin', 'conversation.rename', id, new Date().toISOString());
+        return getConversation(id);
+      });
+      wakeEventWaiters();
+      return send(response, 200, { conversation, conversations: allConversations({ admin: true }) });
     }
 
     const activateConversationMatch = /^\/api\/admin\/conversations\/([^/]+)\/activate$/.exec(path);
@@ -653,20 +797,56 @@ function start(config) {
         return { deletedId: id, activeConversationId: activeConversationId() };
       });
       wakeEventWaiters();
-      return send(response, 200, { ...result, conversations: allConversations() });
+      return send(response, 200, { ...result, conversations: allConversations({ admin: true }) });
     }
 
     if (path === '/api/admin/state' && method === 'GET') {
       authenticate(request, 'admin');
+      const includeMessagesValue = url.searchParams.get('includeMessages');
+      if (includeMessagesValue !== null && includeMessagesValue !== '0' && includeMessagesValue !== '1') fail(400, 'includeMessages must be 0 or 1.');
+      const includeMessages = includeMessagesValue !== '0';
       const conversationId = activeConversationId();
+      const latestMessageId = sql('SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE conversationId = ?').get(conversationId).id;
+      const conversationRow = sql('SELECT pinnedMessageId FROM conversations WHERE id = ?').get(conversationId);
+      const pinnedMessageId = conversationRow && conversationRow.pinnedMessageId ? conversationRow.pinnedMessageId : null;
+      const pinnedMessage = pinnedMessageId === null ? null : sql('SELECT id,"from",CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to",text,createdAt,toAdmin,editedAt FROM messages WHERE id = ? AND conversationId = ?').get(pinnedMessageId, conversationId) || null;
       return send(response, 200, {
         registrationOpen,
-        conversations: allConversations(),
+        conversations: allConversations({ admin: true }),
         activeConversationId: conversationId,
-        agents: sql('SELECT id,name,status,model,createdAt FROM agents ORDER BY createdAt,id').all(),
-        messages: withAttachments(sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? ORDER BY id DESC LIMIT 200').all(conversationId).reverse()),
+        latestMessageId,
+        messageRevision,
+        pinnedMessageId,
+        pinnedMessage,
+        agents: sql('SELECT id,name,status,model,createdAt,avatarHash FROM agents ORDER BY createdAt,id').all().map((agent) => withPresence(agent, Date.now())),
+        messages: includeMessages ? withAttachments(sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? ORDER BY id DESC LIMIT 200').all(conversationId).reverse()) : [],
         tasks: allTasks(conversationId),
         audit: sql('SELECT * FROM audit ORDER BY id DESC LIMIT 200').all().reverse(),
+      });
+    }
+
+    if (path === '/api/admin/health' && method === 'GET') {
+      authenticate(request, 'admin');
+      const databasePath = join(config.dataDir, 'chat.sqlite');
+      const fileSize = (file) => { try { return statSync(file).size; } catch { return 0; } };
+      const memory = process.memoryUsage();
+      const count = (table) => sql(`SELECT COUNT(*) AS count FROM ${table}`).get().count;
+      return send(response, 200, {
+        version: packageVersion,
+        node: process.version,
+        uptimeSeconds: Math.round(process.uptime()),
+        port: actualPort,
+        databaseBytes: fileSize(databasePath),
+        walBytes: fileSize(databasePath + '-wal'),
+        messageRevision,
+        counts: {
+          agents: count('agents'),
+          messages: count('messages'),
+          tasks: count('tasks'),
+          conversations: count('conversations'),
+          attachments: count('attachments'),
+        },
+        memory: { rss: memory.rss, heapUsed: memory.heapUsed },
       });
     }
 
@@ -707,6 +887,67 @@ function start(config) {
       });
       wakeEventWaiters();
       return send(response, 200, { action: body.action, updated: result.updated });
+    }
+
+    const messagePinMatch = /^\/api\/admin\/messages\/(\d+)\/pin$/.exec(path);
+    if (messagePinMatch && method === 'POST') {
+      authenticate(request, 'admin');
+      const body = await jsonBody(request);
+      authenticate(request, 'admin');
+      fields(body, ['pinned'], ['pinned']);
+      if (typeof body.pinned !== 'boolean') fail(400, 'pinned must be a boolean.');
+      const messageId = integer(messagePinMatch[1], 'message id', 1, Number.MAX_SAFE_INTEGER);
+      const message = sql('SELECT id,conversationId FROM messages WHERE id = ?').get(messageId);
+      if (!message) fail(404, 'Message not found.');
+      const now = new Date().toISOString();
+      transaction(() => {
+        if (body.pinned) {
+          sql('UPDATE conversations SET pinnedMessageId = ? WHERE id = ?').run(messageId, message.conversationId);
+          audit('admin', 'message.pin', messageId, now);
+        } else {
+          sql('UPDATE conversations SET pinnedMessageId = NULL WHERE id = ? AND pinnedMessageId = ?').run(message.conversationId, messageId);
+          audit('admin', 'message.unpin', messageId, now);
+        }
+      });
+      const pinned = sql('SELECT pinnedMessageId FROM conversations WHERE id = ?').get(message.conversationId).pinnedMessageId ?? null;
+      return send(response, 200, { conversationId: message.conversationId, pinnedMessageId: pinned });
+    }
+
+    const messageEditMatch = /^\/api\/admin\/messages\/(\d+)\/edit$/.exec(path);
+    if (messageEditMatch && method === 'POST') {
+      authenticate(request, 'admin');
+      const body = await jsonBody(request);
+      authenticate(request, 'admin');
+      fields(body, ['text'], ['text']);
+      const messageId = integer(messageEditMatch[1], 'message id', 1, Number.MAX_SAFE_INTEGER);
+      const messageText = text(body.text, 'text', 0, 8000);
+      if (!sql('SELECT id FROM messages WHERE id = ?').get(messageId)) fail(404, 'Message not found.');
+      if (!messageText.trim() && !sql('SELECT COUNT(*) AS count FROM attachments WHERE messageId = ?').get(messageId).count) fail(400, 'A message must contain text or an attachment.');
+      const now = new Date().toISOString();
+      transaction(() => {
+        sql('UPDATE messages SET text = ?, editedAt = ? WHERE id = ?').run(messageText, now, messageId);
+        audit('admin', 'message.edit', messageId, now);
+      });
+      messageRevision += 1;
+      wakeEventWaiters();
+      return send(response, 200, { messageRevision, editedAt: now });
+    }
+
+    const messageDeleteMatch = /^\/api\/admin\/messages\/(\d+)\/delete$/.exec(path);
+    if (messageDeleteMatch && method === 'POST') {
+      authenticate(request, 'admin');
+      const body = await jsonBody(request);
+      fields(body, []);
+      const messageId = integer(messageDeleteMatch[1], 'message id', 1, Number.MAX_SAFE_INTEGER);
+      if (!sql('SELECT id FROM messages WHERE id = ?').get(messageId)) fail(404, 'Message not found.');
+      transaction(() => {
+        sql('UPDATE conversations SET pinnedMessageId = NULL WHERE pinnedMessageId = ?').run(messageId);
+        sql('DELETE FROM messages WHERE id = ?').run(messageId);
+        audit('admin', 'message.delete', messageId, new Date().toISOString());
+      });
+      messageRevision += 1;
+      wakeEventWaiters();
+      return send(response, 200, { deletedId: messageId, messageRevision });
     }
 
     const adminAgentMatch = /^\/api\/admin\/agents\/([^/]+)$/.exec(path);
@@ -789,17 +1030,28 @@ function start(config) {
       return send(response, 200, { round: scoring.recordAward(id, { points: body.points, evidence, rationale, adjudicator: 'admin' }) });
     }
 
+    if (path === '/api/activity' && method === 'POST') {
+      const actor = authenticate(request, 'agent');
+      if (actor.status !== 'active' && actor.status !== 'paused') fail(403, 'Agent is not active; administrator approval is required.');
+      const body = await jsonBody(request);
+      fields(body, ['state', 'detail'], ['state']);
+      const state = text(body.state, 'state', 1, 16);
+      if (!activityStates.includes(state)) fail(400, 'state must be thinking, generating, or idle.');
+      const detail = Object.hasOwn(body, 'detail') ? text(body.detail, 'detail', 0, 80, true) : '';
+      const at = Date.now();
+      activities.set(actor.id, { state, detail, at });
+      // A report is also proof of life so long generations stay visible.
+      heartbeats.set(actor.id, at);
+      return send(response, 200, { activity: { state, detail, at: new Date(at).toISOString() } });
+    }
+
     if (path === '/api/agents' && method === 'GET') {
       const actor = authenticate(request, 'member');
       const rows = actor.admin
-        ? sql('SELECT id,name,status,model,createdAt FROM agents ORDER BY createdAt,id').all()
-        : sql("SELECT id,name,status,model,createdAt FROM agents WHERE status = 'active' ORDER BY createdAt,id").all();
+        ? sql('SELECT id,name,status,model,createdAt,avatarHash FROM agents ORDER BY createdAt,id').all()
+        : sql("SELECT id,name,status,model,createdAt,avatarHash FROM agents WHERE status = 'active' ORDER BY createdAt,id").all();
       const now = Date.now();
-      const agents = rows.map((agent) => {
-        const last = heartbeats.get(agent.id);
-        return { ...agent, lastHeartbeatAt: last === undefined ? null : new Date(last).toISOString(), online: last !== undefined && now - last <= heartbeatMaxGapMs && (agent.status === 'active' || agent.status === 'paused') };
-      });
-      return send(response, 200, { agents });
+      return send(response, 200, { agents: rows.map((agent) => withPresence(agent, now)) });
     }
 
     if (path === '/api/events' && method === 'GET') {
@@ -851,6 +1103,37 @@ function start(config) {
       response.writeHead(200, { 'Content-Type': attachment.contentType, 'Content-Length': attachment.size, 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(attachment.name).replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase())}` });
       response.end(attachment.data);
       return;
+    }
+
+    if (path === '/api/messages/search' && method === 'GET') {
+      const actor = authenticate(request, 'member');
+      for (const key of url.searchParams.keys()) {
+        if (!['conversationId', 'q', 'limit', 'from'].includes(key)) fail(400, 'Unknown search parameter.');
+        if (url.searchParams.getAll(key).length > 1) fail(400, 'Repeated search parameter.');
+      }
+      const conversationId = readConversationId(url.searchParams);
+      const query = url.searchParams.has('q') ? text(url.searchParams.get('q'), 'q', 0, 200, true) : '';
+      const limit = integer(url.searchParams.get('limit') ?? '50', 'limit', 1, 100);
+      const fromValue = url.searchParams.get('from');
+      const sender = fromValue === null ? null : fromValue === 'admin' ? 'admin' : agentId(fromValue);
+      if (!query && sender === null) fail(400, 'q or from is required.');
+      const conditions = ['conversationId = ?'];
+      const parameters = [conversationId];
+      if (query) {
+        conditions.push("text LIKE ? ESCAPE '\\'");
+        parameters.push('%' + query.replace(/[\\%_]/g, (character) => '\\' + character) + '%');
+      }
+      if (!actor.admin) {
+        conditions.push('(("to" IS NULL AND toAdmin = 0) OR "to" = ? OR "from" = ?)');
+        parameters.push(actor.id, actor.id);
+      }
+      if (sender !== null) {
+        conditions.push('"from" = ?');
+        parameters.push(sender);
+      }
+      parameters.push(limit);
+      const rows = sql(`SELECT *, CASE WHEN toAdmin = 1 THEN 'admin' ELSE "to" END AS "to" FROM messages WHERE ${conditions.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...parameters);
+      return send(response, 200, { messages: withAttachments(rows), query, conversationId, from: sender, earliest_available_id: earliestAvailableId(actor, conversationId) });
     }
 
     if (path === '/api/messages' && method === 'GET') {
@@ -945,6 +1228,43 @@ function start(config) {
       return send(response, 201, { task });
     }
 
+    const adminTaskAssignMatch = /^\/api\/admin\/tasks\/(\d+)\/assign$/.exec(path);
+    if (adminTaskAssignMatch && method === 'POST') {
+      authenticate(request, 'admin');
+      const body = await jsonBody(request);
+      authenticate(request, 'admin');
+      fields(body, ['owner'], ['owner']);
+      const id = integer(adminTaskAssignMatch[1], 'task id', 1, Number.MAX_SAFE_INTEGER);
+      const owner = agentId(body.owner);
+      const current = getTask(id);
+      if (!current) fail(404, 'Task not found.');
+      if (current.status === 'done') fail(409, 'Reopen the task before assigning it.');
+      const agent = sql('SELECT id,status FROM agents WHERE id = ?').get(owner);
+      if (!agent) fail(404, 'Agent not found.');
+      if (agent.status !== 'active') fail(400, 'Owner must be an active member.');
+      const now = new Date().toISOString();
+      transaction(() => {
+        sql("UPDATE tasks SET owner = ?, status = 'claimed', updatedAt = ? WHERE id = ?").run(owner, now, id);
+        audit('admin', 'task.assign', id, now);
+      });
+      return send(response, 200, { task: getTask(id) });
+    }
+
+    const adminTaskDeleteMatch = /^\/api\/admin\/tasks\/(\d+)\/delete$/.exec(path);
+    if (adminTaskDeleteMatch && method === 'POST') {
+      authenticate(request, 'admin');
+      const body = await jsonBody(request);
+      authenticate(request, 'admin');
+      fields(body, []);
+      const id = integer(adminTaskDeleteMatch[1], 'task id', 1, Number.MAX_SAFE_INTEGER);
+      if (!getTask(id)) fail(404, 'Task not found.');
+      transaction(() => {
+        sql('DELETE FROM tasks WHERE id = ?').run(id);
+        audit('admin', 'task.delete', id, new Date().toISOString());
+      });
+      return send(response, 200, { deletedId: id });
+    }
+
     const taskMatch = /^\/api\/tasks\/([^/]+)$/.exec(path);
     if (taskMatch && method === 'POST') {
       authenticate(request);
@@ -983,7 +1303,7 @@ function start(config) {
       return send(response, 200, { task });
     }
 
-    if (['/api/join', '/api/me', '/api/admin/state', '/api/admin/registration', '/api/admin/conversations', '/api/conversations', '/api/agents', '/api/messages', '/api/attachments', '/api/tasks', '/api/events', '/api/group-tools', '/api/scoring', '/api/admin/scoring/rounds'].includes(path) || scoreMatch || attachmentMatch || adminAgentMatch || activateConversationMatch || deleteConversationMatch || taskMatch) {
+    if (['/api/join', '/api/me', '/api/avatar', '/api/admin/state', '/api/admin/health', '/api/admin/registration', '/api/admin/conversations', '/api/conversations', '/api/pinned', '/api/agents', '/api/activity', '/api/messages', '/api/messages/search', '/api/attachments', '/api/tasks', '/api/events', '/api/group-tools', '/api/scoring', '/api/admin/scoring/rounds'].includes(path) || path.startsWith('/api/avatars/') || scoreMatch || attachmentMatch || messagePinMatch || messageEditMatch || messageDeleteMatch || renameConversationMatch || adminAgentMatch || activateConversationMatch || deleteConversationMatch || adminTaskAssignMatch || adminTaskDeleteMatch || taskMatch) {
       fail(405, 'Method not allowed.');
     }
     fail(404, 'Not found.');

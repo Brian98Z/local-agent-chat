@@ -20,6 +20,13 @@ for (let index = 0; index < argv.length; index += 1) {
 for (const required of ['prompt-file', 'name', 'identity', 'url']) {
   if (!options[required]) { console.error(usage); process.exit(2); }
 }
+let chatUrl;
+try { chatUrl = new URL(options.url); } catch { console.error('worker: --url must be http://127.0.0.1:PORT'); process.exit(2); }
+if (chatUrl.protocol !== 'http:' || chatUrl.hostname !== '127.0.0.1' || chatUrl.username || chatUrl.password || chatUrl.pathname !== '/' || chatUrl.search || chatUrl.hash) {
+  console.error('worker: --url must be http://127.0.0.1:PORT');
+  process.exit(2);
+}
+options.url = chatUrl.origin;
 const promptFile = resolve(options['prompt-file']);
 const projectDir = resolve(options.cwd || 'D:/OMP/project/local-agent-chat');
 const mcpPath = join(projectDir, 'mcp.mjs');
@@ -30,6 +37,25 @@ const maxChars = Number(options['max-chars'] ?? 60000);
 const maxMessages = Number(options['max-messages'] ?? 2000);
 const apiTimeout = Number(options['api-timeout'] ?? 25000);
 const chatTimeout = Number(options['chat-timeout'] ?? 180000);
+
+// 交互状态上报：让管理员在监控界面看到“思考中 / 生成中”，失败不影响回复生成。
+let activityToken = '';
+try {
+  const candidate = (await readFile(resolve(options.identity), 'utf8')).trim();
+  if (/^[a-f0-9]{64}$/i.test(candidate)) activityToken = candidate;
+} catch { /* 身份文件尚未生成时不报状态 */ }
+async function reportActivity(state) {
+  if (!activityToken) return;
+  try {
+    await fetch(new URL('/api/activity', options.url), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${activityToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state }),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch { /* 状态上报是观测信息，不影响回复 */ }
+}
+await reportActivity('thinking');
 
 function callTool(tool, args = {}) {
   const argvCli = ['--name', options.name, '--identity', resolve(options.identity), '--url', options.url, '--call', tool];
@@ -48,6 +74,26 @@ function callTool(tool, args = {}) {
   } catch {
     throw new Error(`${tool} 返回非 JSON：${(result.stdout || '').trim().slice(0, 200)}`);
   }
+}
+
+// 读取走本成员令牌直连 HTTP，避免每次工具调用都启动一个 180ms 的 CLI 子进程。
+// 只有缺少身份文件时才回退到 CLI 路径（保持原有报错行为）。
+const apiBase = String(options.url).replace(/\/+$/, '');
+async function apiGet(path) {
+  const response = await fetch(apiBase + path, {
+    headers: { Authorization: `Bearer ${activityToken}` },
+    signal: AbortSignal.timeout(apiTimeout),
+  });
+  const body = await response.text();
+  if (!response.ok) throw new Error(`HTTP ${response.status}：${body.slice(0, 200)}`);
+  return JSON.parse(body);
+}
+async function readTool(tool, args = {}) {
+  if (!activityToken) return callTool(tool, args);
+  if (tool === 'chat_agents') return apiGet('/api/agents');
+  if (tool === 'chat_conversations') return apiGet('/api/conversations');
+  if (tool === 'chat_read') return apiGet(`/api/messages?conversationId=${encodeURIComponent(args.conversationId)}&after=${args.after ?? 0}&limit=${args.limit ?? 200}`);
+  return callTool(tool, args);
 }
 
 // 极简 models.yml 读取：只取指定 provider 的 baseUrl/apiKey/api 与该模型级 Authorization。
@@ -105,10 +151,10 @@ let conversations = [];
 const transcripts = new Map();
 
 try {
-  roster = (callTool('chat_agents').agents || []);
+  roster = ((await readTool('chat_agents')).agents || []);
 } catch (error) { notes.push(`成员名册获取失败：${error.message}`); }
 try {
-  conversations = callTool('chat_conversations').conversations || [];
+  conversations = (await readTool('chat_conversations')).conversations || [];
 } catch (error) { notes.push(`对话列表获取失败：${error.message}`); }
 
 let remaining = maxChars;
@@ -118,7 +164,7 @@ for (const conversation of conversations) {
   let scanned = 0;
   try {
     for (;;) {
-      const page = callTool('chat_read', { conversationId: conversation.id, after, limit: 200 });
+      const page = await readTool('chat_read', { conversationId: conversation.id, after, limit: 200 });
       const messages = page.messages || [];
       scanned += messages.length;
       // Worker replies may be broadcast: never inject private history into its context.
@@ -167,6 +213,7 @@ if (notes.length) {
 
 // 全部接口调用失败时宁可失败也不让模型凭空编造。
 if (roster.length === 0 && [...transcripts.values()].every(rows => rows.length === 0)) {
+  await reportActivity('idle');
   console.error('worker: 聊天接口全部失败，拒绝生成回复。' + (notes.length ? ' ' + notes.join(' | ') : ''));
   process.exit(1);
 }
@@ -180,6 +227,8 @@ const provider = await readProvider();
 const url = provider.baseUrl.replace(/\/+$/, '') + '/chat/completions';
 const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${provider.apiKey}`, ...(provider.headers.Authorization ? { Authorization: provider.headers.Authorization } : {}) };
 let response;
+const activityKeepAlive = setInterval(() => { void reportActivity('generating'); }, 15000);
+await reportActivity('generating');
 try {
   response = await fetch(url, {
     method: 'POST',
@@ -194,19 +243,24 @@ try {
     signal: AbortSignal.timeout(chatTimeout),
   });
 } catch (error) {
+  clearInterval(activityKeepAlive);
+  await reportActivity('idle');
   console.error('worker: 模型请求失败：' + error.message);
   process.exit(1);
 }
+clearInterval(activityKeepAlive);
 const text = await response.text();
 if (!response.ok) {
+  await reportActivity('idle');
   console.error(`worker: 模型接口 HTTP ${response.status}：${text.slice(0, 400)}`);
   process.exit(1);
 }
 let payload;
-try { payload = JSON.parse(text); } catch { console.error('worker: 模型接口返回非 JSON'); process.exit(1); }
+try { payload = JSON.parse(text); } catch { await reportActivity('idle'); console.error('worker: 模型接口返回非 JSON'); process.exit(1); }
 let reply = payload?.choices?.[0]?.message?.content ?? '';
 reply = String(reply).trim();
 const fenced = /^```(?:markdown|md|text)?\s*([\s\S]*?)\s*```$/i.exec(reply);
 if (fenced) reply = fenced[1].trim();
-if (!reply) { console.error('worker: 模型返回空回复'); process.exit(1); }
+if (!reply) { await reportActivity('idle'); console.error('worker: 模型返回空回复'); process.exit(1); }
+await reportActivity('idle');
 process.stdout.write(reply + '\n');

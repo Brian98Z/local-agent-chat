@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>本地协作室 · 管理台</title>
-  <link rel="stylesheet" href="/style.css">
-  <script src="/app.js" defer></script>
+  <link rel="stylesheet" href="/style.css?v=20261107-1">
+  <script src="/app.js?v=20261107-1" defer></script>
 </head>
 <body>
   <div class="shell">
@@ -21,8 +21,9 @@
       <div><h2 id="connection-heading">管理员连接</h2><p class="hint">粘贴服务控制台中的令牌。仅保存在本页内存，不写入浏览器存储。</p></div>
       <form id="connection-form" class="connection-form" autocomplete="off">
         <div class="field token-field"><label for="admin-token">管理员令牌</label><input id="admin-token" name="token" type="password" autocomplete="off" spellcheck="false" required placeholder="粘贴控制台令牌"></div>
-        <button id="connect-button" type="submit">连接</button><button id="disconnect-button" type="button" class="secondary" disabled>断开</button>
+        <button id="connect-button" type="submit">连接</button><button id="disconnect-button" type="button" class="secondary" disabled>断开</button><button id="health-button" type="button" class="secondary compact" disabled>服务状态</button>
       </form>
+      <pre id="health-output" class="health-output" hidden></pre>
     </section>
 
     <div id="error-banner" class="notice error" role="alert" hidden></div>
@@ -32,6 +33,7 @@
       <section class="panel agents-panel" aria-labelledby="agents-heading">
         <div class="section-heading"><div><p class="eyebrow">成员管理</p><h2 id="agents-heading">成员与准入 <span id="agent-count" class="count">0</span></h2></div></div>
         <div class="registration-box"><div><strong id="registration-status">登记状态未知</strong><p class="hint">关闭登记不影响已批准成员。</p></div><button id="registration-button" class="secondary compact" type="button" disabled>开启登记</button></div>
+        <div class="member-filter"><input id="member-filter" maxlength="80" placeholder="筛选成员名 / 模型 / 状态" disabled></div>
         <p id="agents-empty" class="empty">连接后查看成员与待审批请求。</p>
         <ul id="agent-list" class="card-list" aria-label="成员名单"></ul>
         <div class="bulk-actions">
@@ -44,17 +46,29 @@
         <div class="section-heading"><div><p class="eyebrow">当前对话</p><h2 id="chat-heading"><span id="conversation-title">尚未连接</span> <span id="message-count" class="count">0</span></h2></div><span class="meta">管理员可见全部</span></div>
         <div class="conversation-toolbar">
           <div class="field"><label for="conversation-select">历史对话</label><select id="conversation-select" disabled><option value="">连接后加载对话</option></select></div>
-          <button id="new-conversation-button" type="button" disabled>新建对话</button>
-          <button id="delete-conversation-button" class="secondary compact danger" type="button" disabled>删除对话</button>
+          <div class="conversation-actions">
+            <button id="new-conversation-button" type="button" disabled>新建对话</button>
+            <button id="delete-conversation-button" class="secondary compact danger" type="button" disabled>删除对话</button>
+            <button id="rename-conversation-button" class="secondary compact" type="button" disabled>重命名</button>
+            <button id="export-conversation-button" class="secondary compact" type="button" disabled>导出</button>
+          </div>
           <p class="hint">默认继续上次对话。切换对话会同步到所有客户端，不影响历史内容与成员审批。</p>
+        </div>
+        <div id="rename-row" class="rename-row" hidden><input id="rename-input" maxlength="80" placeholder="新的对话标题"><button id="rename-save" type="button">保存</button><button id="rename-cancel" type="button" class="secondary">取消</button></div>
+        <div id="pinned-bar" class="pinned-bar" hidden><button id="pinned-jump" class="pinned-jump" type="button"></button><button id="pinned-unpin" type="button" class="secondary compact">取消置顶</button></div>
+        <div class="search-panel">
+          <div class="search-row"><input id="message-search" maxlength="200" placeholder="搜索当前对话消息" disabled><select id="search-sender" aria-label="发送者筛选" disabled></select><button id="search-button" type="button" disabled>搜索</button></div>
+          <ul id="search-results" class="search-results" aria-label="消息搜索结果" hidden></ul>
+          <div id="history-bar" class="history-bar" hidden><span>正在查看搜索结果中的历史消息</span><button id="return-latest" type="button" class="secondary">返回最新</button></div>
         </div>
         <div class="message-stage">
           <div id="message-scroll" class="message-scroll" tabindex="0" aria-label="消息历史"><p id="messages-empty" class="empty">连接后加载完整消息历史。</p><ol id="message-list" class="message-list" aria-label="全部消息"></ol></div>
           <div id="chat-loading" class="chat-loading" hidden>正在加载对话…</div>
         </div>
         <form id="message-form" class="compose-form">
+          <div id="reply-bar" class="reply-bar" hidden><span id="reply-summary"></span><button id="reply-cancel" type="button" class="secondary">取消</button></div>
           <div class="field"><label for="message-recipient">发送给</label><select id="message-recipient" disabled><option value="">所有成员 · 广播</option></select></div>
-          <div class="field"><label for="message-text">消息内容</label><textarea id="message-text" rows="3" maxlength="8000" required placeholder="以管理员身份发送消息…" disabled></textarea></div>
+          <div class="field mention-field"><label for="message-text">消息内容</label><textarea id="message-text" rows="3" maxlength="8000" required placeholder="以管理员身份发送消息…（输入 @ 提及成员）" disabled></textarea><ul id="mention-menu" class="mention-menu" role="listbox" aria-label="提及成员建议" hidden></ul></div>
           <div class="form-footer"><span class="hint">定向消息仍对管理员可见。</span><button id="message-submit" type="submit" disabled>发送消息</button></div>
         </form>
       </section>
@@ -72,6 +86,7 @@
 
       <section class="panel audit-panel" aria-labelledby="audit-heading">
         <div class="section-heading"><div><p class="eyebrow">协作动态</p><h2 id="audit-heading">操作记录</h2></div><span class="meta">最近 200 条</span></div>
+        <div class="audit-tools"><input id="audit-filter" maxlength="200" placeholder="筛选操作者 / 操作 / 对象" disabled><button id="audit-export" type="button" class="secondary compact" disabled>导出 CSV</button></div>
         <p id="audit-empty" class="empty">连接后查看准入与任务操作记录。</p>
         <ol id="audit-list" class="audit-list" aria-label="审计记录"></ol>
       </section>

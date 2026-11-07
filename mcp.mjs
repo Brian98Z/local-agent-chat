@@ -14,9 +14,9 @@ async function displayLanguage() {
   });
 }
 
-const usage = 'node mcp.mjs --name NAME --model MODEL --identity ABSOLUTE_KEY_FILE [--url http://127.0.0.1:4317] [--call TOOL --args JSON] [--text-file PATH]';
+const usage = 'node mcp.mjs --name NAME --model MODEL --identity ABSOLUTE_KEY_FILE [--url http://127.0.0.1:4317] [--call TOOL --args JSON] [--text-file PATH] [--avatar PATH]';
 const versions = ['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'];
-const bridgeVersion = '1.1.0';
+const bridgeVersion = '1.2.0';
 const string = (maxLength, minLength = 1) => ({ type: 'string', minLength, maxLength });
 const id = { type: 'integer', minimum: 1 };
 const clientRequestId = string(128);
@@ -29,8 +29,12 @@ const groupToolRoutes = new Map([
 ]);
 class TransportError extends Error {}
 const definitions = [
-  ['chat_join', '以自己的唯一名称和固定模型标识申请接入（模型标识由桥的 --model 提供，登记后不可更改）。需要人工开启登记并批准；不能自行批准。', {}, []],
+  ['chat_join', '以自己的唯一名称和固定模型标识申请接入（模型标识由桥的 --model 提供，登记后不可更改）。新成员必须提交自行绘制的 SVG 头像 avatarSvg（≤16000 字符，安全子集），已登记身份可用 chat_avatar 更新。需要人工开启登记并批准；不能自行批准。', { avatarSvg: string(16000, 1) }, []],
+  ['chat_avatar', '更新本人 SVG 头像；只影响头像显示，不改变名称、模型、消息或权限。', { avatarSvg: string(16000, 1) }, ['avatarSvg']],
   ['chat_ready', '长连接握手：返回自身状态、当前对话、心跳参数与是否可读写；pending/revoked 返回 ready=false，paused 可读可等待但不可写。', {}, []],
+  ['chat_pinned', '读取当前对话的置顶消息（仅当该消息对本人可见）；用于获取管理员固定的当前指令，不改变游标或消息状态。', { conversationId: id }, []],
+  ['chat_search', '搜索当前对话内本人可见的历史消息（最近匹配，最多100条）；q 与 from 至少提供一个，from=admin 或成员 id 可过滤发送者；不改变消息游标或状态，通配符按字面量处理。', { conversationId: id, q: string(200, 1), limit: { type: 'integer', minimum: 1, maximum: 100 }, from: { anyOf: [{ type: 'string', minLength: 5, maxLength: 5, pattern: '^admin$' }, { type: 'string', minLength: 36, maxLength: 36, pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' }] } }, []],
+  ['chat_activity', '上报本人当前交互状态，供管理员实时查看：thinking=思考中，generating=生成中，idle=空闲。只影响本人状态与心跳，不改变消息、任务或权限；请在开始推理/撰写回复时主动上报。', { state: { type: 'string', enum: ['thinking', 'generating', 'idle'] }, detail: string(80, 0) }, ['state']],
   ['chat_status', '查询自身接入状态（pending/active/paused/revoked）；paused 表示被人工禁言：仍可读、可等待，但不能发送或变更任务。', {}, []],
   ['chat_agents', '列出可协作的 active agents。', {}, []],
   ['chat_conversations', '查看历史对话与人工选择的 activeConversationId。只有管理员可新建或切换当前对话。', {}, []],
@@ -74,7 +78,7 @@ async function main() {
   if (argv.includes('--help')) { console.log(usage); return; }
   for (let n = 0; n < argv.length; n += 2) {
     const key = argv[n];
-    if (!['--name', '--model', '--identity', '--url', '--call', '--args', '--text-file'].includes(key) || !argv[n + 1] || options[key] !== undefined) throw new Error(usage);
+    if (!['--name', '--model', '--identity', '--url', '--call', '--args', '--text-file', '--avatar'].includes(key) || !argv[n + 1] || options[key] !== undefined) throw new Error(usage);
     options[key] = argv[n + 1];
   }
   const name = options['--name']?.trim();
@@ -126,6 +130,10 @@ async function main() {
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${data.error || 'Request failed'}`);
     return data;
   }
+  // Presence reports are advisory: a failure must never break chat behaviour.
+  async function reportActivity(state, detail) {
+    try { await request('/api/activity', { state, ...(detail ? { detail } : {}) }, 3000); } catch { /* ignored */ }
+  }
   async function waitForMessages(args) {
     const deadline = Date.now() + 35000;
     const hold = args.timeout ?? 25000;
@@ -149,7 +157,7 @@ async function main() {
       case 'chat_join':
         if (!model) throw new Error('未声明模型标识；请为该客户端配置固定的 --model。');
         {
-          const joined = await request('/api/join', { name, token, model });
+          const joined = await request('/api/join', { name, token, model, ...(args.avatarSvg === undefined ? {} : { avatarSvg: args.avatarSvg }) });
           await persistIdentity();
           return joined;
         }
@@ -159,6 +167,7 @@ async function main() {
         const heartbeat = { timeout: 25000, maxGapMs: 45000 };
         if (status !== 'active' && status !== 'paused') return { ready: false, readable: false, canWrite: false, agent: me.agent, heartbeat };
         const conversations = await request('/api/conversations');
+        await reportActivity('idle');
         return {
           ready: status === 'active',
           readable: true,
@@ -169,12 +178,35 @@ async function main() {
           heartbeat,
         };
       }
+      case 'chat_pinned': return request('/api/pinned' + (args.conversationId === undefined ? '' : '?conversationId=' + args.conversationId));
+      case 'chat_search': {
+        const params = new URLSearchParams();
+        if (args.q !== undefined) params.set('q', args.q);
+        if (args.conversationId !== undefined) params.set('conversationId', String(args.conversationId));
+        if (args.limit !== undefined) params.set('limit', String(args.limit));
+        if (args.from !== undefined) params.set('from', args.from);
+        return request('/api/messages/search?' + params.toString());
+      }
+      case 'chat_activity': return request('/api/activity', args, 5000);
+      case 'chat_avatar': return request('/api/avatar', { avatarSvg: args.avatarSvg }, 5000);
       case 'chat_status': return (await request('/api/me')).agent;
       case 'chat_agents': return request('/api/agents');
       case 'chat_conversations': return request('/api/conversations');
-      case 'chat_read': return request(`/api/messages?${args.before === undefined ? `after=${args.after ?? 0}` : `before=${args.before}${args.after === undefined ? '' : `&after=${args.after}`}`}&limit=${args.limit ?? 100}${args.conversationId === undefined ? '' : `&conversationId=${args.conversationId}`}`);
-      case 'chat_wait': return waitForMessages(args);
-      case 'chat_send': return request('/api/messages', args);
+      case 'chat_read': {
+        const result = await request(`/api/messages?${args.before === undefined ? `after=${args.after ?? 0}` : `before=${args.before}${args.after === undefined ? '' : `&after=${args.after}`}`}&limit=${args.limit ?? 100}${args.conversationId === undefined ? '' : `&conversationId=${args.conversationId}`}`);
+        if ((result.messages ?? []).length > 0) await reportActivity('thinking');
+        return result;
+      }
+      case 'chat_wait': {
+        const result = await waitForMessages(args);
+        if ((result.messages ?? []).length > 0) await reportActivity('thinking');
+        return result;
+      }
+      case 'chat_send': {
+        const result = await request('/api/messages', args);
+        await reportActivity('idle');
+        return result;
+      }
       case 'chat_upload': return request('/api/attachments', args, 60000);
       case 'chat_download': {
         if (!/^[a-f0-9-]{36}$/i.test(args.id)) throw new Error('Invalid attachment id.');
@@ -199,6 +231,11 @@ async function main() {
     if (options['--text-file']) {
       if (options['--call'] !== 'chat_send') throw new Error('--text-file is only supported with --call chat_send');
       args.text = (await readFile(options['--text-file'], 'utf8')).replace(/\r\n/g, '\n');
+    }
+    if (options['--avatar']) {
+      if (!['chat_join', 'chat_avatar'].includes(options['--call'])) throw new Error('--avatar requires --call chat_join or chat_avatar');
+      if (args.avatarSvg !== undefined) throw new Error('--avatar conflicts with --args avatarSvg');
+      args.avatarSvg = (await readFile(options['--avatar'], 'utf8')).trim();
     }
     const result = await call(options['--call'], args);
     console.log(JSON.stringify(result, null, 2));

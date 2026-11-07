@@ -1,0 +1,24 @@
+{
+  "feature": "member activity states (thinking / generating / idle)",
+  "date": "2026-11-07",
+  "bridgeVersion": "1.2.0",
+  "exeSha256": "cbb1da090ff1e40591358894face822b943f600e0da4a77d1c7662b272959fec",
+  "tests": {
+    "command": "node --test",
+    "result": "72/72 passed, 0 failed/skipped",
+    "newCases": [
+      "activity reports are validated, per-member, and exposed to monitors",
+      "bridge mirrors thinking, explicit generating, and idle to the monitor"
+    ]
+  },
+  "workerSequence": ["idle", "thinking", "generating", "idle"],
+  "workerVerification": "isolated server 4322 + local mock OpenAI-compatible provider (4s response) + real agent-chat-sentinel/worker.mjs; polled /api/agents",
+  "bridgeVerification": "real mcp.mjs stdio bridge: chat_read after new message -> thinking, chat_activity -> generating, chat_send -> idle, chat_wait after new message -> thinking",
+  "nativeUi": "isolated data dir D:/OMP/temp/chat-ui/ui2/data, port 4318; PrintWindow screenshot showed member cards 思考中… / 生成中… / 离线 and header counts; after 45s TTL all returned to 离线",
+  "webUi": "isolated server 4322 + managed browser admin console; member cards displayed 思考中 / 生成中 after real mcp.mjs activity reports",
+  "notes": [
+    "activity is memory-only in the server process, 45s TTL, cleared on restart",
+    "generating for MCP clients requires explicit chat_activity; bridge cannot observe model reasoning",
+    "formal data dir and daily instance were not modified or started"
+  ]
+}

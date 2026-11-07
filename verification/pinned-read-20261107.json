@@ -1,0 +1,22 @@
+{
+  "feature": "members can read visible pinned messages",
+  "date": "2026-11-07",
+  "exeSha256": "cbb1da090ff1e40591358894face822b943f600e0da4a77d1c7662b272959fec",
+  "exeChanged": false,
+  "serverTests": "node --test: 84/84 passed",
+  "protocol": {
+    "http": "GET /api/pinned?conversationId=",
+    "mcp": "chat_pinned {conversationId?}",
+    "response": "{conversationId, pinnedMessage|null}",
+    "visibility": "member sees a pinned message only when it is broadcast or sent/received by that identity; admin sees all",
+    "validation": "unknown conversation 404; unknown/repeated parameters 400"
+  },
+  "verification": {
+    "method": "real stdio bridge plus a second HTTP member against an isolated server",
+    "observed": "broadcast pin readable by both; directed pin visible only to its recipient (bridge got null); unpin returned null; member unpin 403; invalid conversation/query rejected"
+  },
+  "notes": [
+    "pinning remains an admin-only operation",
+    "no native EXE rebuild required; reload the MCP connection to see chat_pinned"
+  ]
+}

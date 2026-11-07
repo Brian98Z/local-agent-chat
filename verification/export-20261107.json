@@ -1,0 +1,25 @@
+{
+  "feature": "conversation export to Markdown",
+  "date": "2026-11-07",
+  "exeSha256": "cbb1da090ff1e40591358894face822b943f600e0da4a77d1c7662b272959fec",
+  "serverTests": "node --test: 78/78 passed (client-only change; no server endpoint added)",
+  "native": {
+    "method": "temporary harness connected to an isolated server and invoked WriteConversationMarkdownAsync on the form message loop",
+    "observed": "3 messages exported; file contains '# 导出测试', broadcast text, attachment name note.txt and '回复 #1'",
+    "ui": "conversation list right-click adds 导出对话为 Markdown… with a SaveFileDialog"
+  },
+  "web": {
+    "method": "headless browser download via waitForDownload",
+    "observed": "downloaded 网页导出测试-20261107-2113.md (230 bytes) containing title, broadcast and reply reference; action status 已导出 2 条消息。"
+  },
+  "format": {
+    "header": "# title; conversation id; export time",
+    "message": "### #id · time · sender · broadcast|directed(admin-visible); optional 回复 #id; text; attachment name/size",
+    "limit": "20000 messages, then a truncation note",
+    "attachments": "metadata only, no binary payload"
+  },
+  "notes": [
+    "export uses existing /api/messages paging and admin visibility",
+    "formal data dir and daily instance were not modified"
+  ]
+}

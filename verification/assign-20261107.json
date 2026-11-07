@@ -1,0 +1,25 @@
+{
+  "feature": "administrator task assignment",
+  "date": "2026-11-07",
+  "exeSha256": "cbb1da090ff1e40591358894face822b943f600e0da4a77d1c7662b272959fec",
+  "serverTests": "node --test: 82/82 passed",
+  "protocol": {
+    "endpoint": "POST /api/admin/tasks/:id/assign with {owner}",
+    "validation": "admin only, owner must exist and be active, task must not be done (409), unknown task/member 404",
+    "effects": "sets owner and status=claimed, updates updatedAt, writes audit task.assign",
+    "response": "{task}"
+  },
+  "native": {
+    "method": "temporary harness connected to an isolated server, created a task, then invoked AssignTaskAsync with an active member id",
+    "observed": "assignDone=true; task list shows 已认领 / 指派成员; server owner matched",
+    "ui": "task window adds 指派 with a member picker over active agents"
+  },
+  "web": {
+    "method": "headless browser: selected the member in the task card dropdown and clicked 指派",
+    "observed": "metadata 负责人：网页指派成员, badge 进行中, server status claimed and owner matched"
+  },
+  "notes": [
+    "reassignment is allowed while open/claimed; done tasks must be reopened first",
+    "formal data dir and daily instance were not modified"
+  ]
+}

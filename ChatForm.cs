@@ -13,9 +13,28 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using System.Runtime.InteropServices;
 
 internal sealed class ChatForm : Form
 {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int message, IntPtr wParam, string lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FLASHWINFO
+    {
+        public uint Size;
+        public IntPtr Handle;
+        public uint Flags;
+        public uint Count;
+        public uint Timeout;
+    }
+    [DllImport("user32.dll")]
+    private static extern bool FlashWindowEx(ref FLASHWINFO info);
+    private const uint FLASHW_STOP = 0;
+    private const uint FLASHW_TRAY = 2;
+    private const uint FLASHW_TIMERNOFG = 12;
+
     private HttpClient client;
     private readonly CancellationTokenSource closing = new CancellationTokenSource();
     private readonly SemaphoreSlim requestGate = new SemaphoreSlim(1, 1);
@@ -25,6 +44,28 @@ internal sealed class ChatForm : Form
     private readonly List<MessageRow> messageRows = new List<MessageRow>();
     private readonly Dictionary<long, ConversationDraft> drafts = new Dictionary<long, ConversationDraft>();
     private readonly Dictionary<long, List<PendingAttachment>> attachmentDrafts = new Dictionary<long, List<PendingAttachment>>();
+    private readonly Dictionary<string, string> avatarSvgByAgent = new Dictionary<string, string>();
+    private readonly Dictionary<string, string> avatarHashByAgent = new Dictionary<string, string>();
+    private readonly Dictionary<long, long> conversationSeen = new Dictionary<long, long>();
+    private readonly Dictionary<long, long> conversationLatest = new Dictionary<long, long>();
+    private readonly HashSet<long> conversationUnread = new HashSet<long>();
+    private bool conversationBaselineDone;
+    private long lastMessageRevision = -1;
+    private readonly string baseTitle = "智能体本地聊天室";
+    private int attentionCount;
+    private bool attentionFlashing;
+    private bool suppressAttention;
+    private Panel replyBar;
+    private Label replyLabel;
+    private Button replyCancelButton;
+    private readonly Dictionary<long, ReplyTarget> replyTargets = new Dictionary<long, ReplyTarget>();
+    private Panel pinnedBar;
+    private Label pinnedLabel;
+    private Button pinnedUnpinButton;
+    private long pinnedMessageId;
+    private TextBox memberFilter;
+    private ToolTip memberToolTip;
+    private List<AgentData> currentVisibleAgents = new List<AgentData>();
     private Button attachmentButton;
     private Label attachmentLabel;
     private ToolTip attachmentToolTip;
@@ -36,7 +77,25 @@ internal sealed class ChatForm : Form
     private readonly Color ink = Color.FromArgb(27, 43, 62);
     private readonly Color muted = Color.FromArgb(116, 131, 148);
     private readonly Color green = Color.FromArgb(0, 139, 132);
-    private ListView auditList, conversationList;
+    private ListView auditList, conversationList, searchResults;
+    private TextBox auditFilter;
+    private Button auditExportButton;
+    private List<string[]> auditRowsAll = new List<string[]>();
+    private Form searchDialog;
+    private TextBox searchInput;
+    private ComboBox searchSender;
+    private Label searchEmpty;
+    private long searchConversationId;
+    private Form taskDialog;
+    private ListView taskList;
+    private TextBox taskTitleInput;
+    private TextBox taskDescriptionInput;
+    private TextBox taskNoteInput;
+    private Label taskDialogTitle;
+    private Label taskDetail;
+    private Button taskClaimButton, taskReleaseButton, taskCompleteButton, taskReopenButton, taskAssignButton, taskDeleteButton;
+    private long taskDialogConversationId;
+    private readonly Dictionary<long, Dictionary<string, object>> taskRowsById = new Dictionary<long, Dictionary<string, object>>();
     private Form auditDialog;
     private Panel memberList;
     private SlimScrollBar memberScroll;
@@ -61,6 +120,9 @@ internal sealed class ChatForm : Form
     private bool browsingHistory, loadingHistory;
     private Button olderHistoryButton, newerHistoryButton;
     private string recipientsSignature = "";
+    private ListBox mentionList;
+    private int mentionStart = -1;
+    private bool mentionInserting;
     private bool handingOff;
     private int activeRequests;
     private bool uncertainOperation;
@@ -393,27 +455,34 @@ internal sealed class ChatForm : Form
         main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var heading = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Color.White, Padding = new Padding(24, 10, 22, 8), ColumnCount = 2, RowCount = 2, Margin = Padding.Empty };
         heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 408));
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 680));
         heading.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         heading.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         groupTitle = Identify(new Label { Text = "本地协作群", Dock = DockStyle.Fill, Font = new Font(Font.FontFamily, 16F, FontStyle.Bold), ForeColor = ink, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true }, "GroupTitle", "本地协作群");
         groupSubtitle = new Label { Text = "人工指令 · 实时协作", Dock = DockStyle.Fill, ForeColor = muted, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
         connectionLabel = Identify(new Label { Text = "●  正在连接", Dock = DockStyle.Fill, ForeColor = muted, TextAlign = ContentAlignment.MiddleRight }, "ConnectionIndicator", "正在连接本机服务");
         var headingActions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
+        var searchButton = MakeToolbarButton("SearchButton", "搜索", false, 80);
+        searchButton.Click += delegate { ShowSearchDialog(); };
+        var tasksButton = MakeToolbarButton("TasksButton", "任务", false, 80);
+        tasksButton.Click += async delegate { await ShowTasksDialogAsync(); };
         var scoringButton = MakeToolbarButton("ScoringButton", "工作证明", false, 96);
         scoringButton.Click += async delegate { await ShowScoringAsync(); await RefreshLeaderboardAsync(true); };
-        var toolsButton = MakeToolbarButton("GroupToolsButton", "群工具", true, 88);
-        toolsButton.Click += async delegate { await ShowGroupToolsAsync(); };
         var auditButton = MakeToolbarButton("AuditToggle", "操作审计", false, 96);
         auditButton.Click += delegate { ShowAuditDialog(); };
         var docButton = MakeToolbarButton("McpDocButton", "接入文档", false, 96);
         docButton.AccessibleName = "保存 MCP 接入文档";
         docButton.Margin = Padding.Empty;
         docButton.Click += delegate { SaveConnectionDocument(); };
-        headingActions.Controls.Add(toolsButton);
+        var healthButton = MakeToolbarButton("HealthButton", "状态", false, 72);
+        healthButton.Margin = new Padding(6, 0, 0, 0);
+        healthButton.Click += async delegate { await ShowHealthDialogAsync(); };
+        headingActions.Controls.Add(searchButton);
+        headingActions.Controls.Add(tasksButton);
         headingActions.Controls.Add(scoringButton);
         headingActions.Controls.Add(auditButton);
         headingActions.Controls.Add(docButton);
+        headingActions.Controls.Add(healthButton);
         heading.Controls.Add(groupTitle, 0, 0);
         heading.Controls.Add(groupSubtitle, 0, 1);
         heading.Controls.Add(connectionLabel, 1, 0);
@@ -457,13 +526,14 @@ internal sealed class ChatForm : Form
 
     private Control BuildMembers()
     {
-        var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 9, Padding = new Padding(16, 16, 14, 12), BackColor = Color.FromArgb(245, 248, 251), Margin = Padding.Empty };
+        var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 10, Padding = new Padding(16, 16, 14, 12), BackColor = Color.FromArgb(245, 248, 251), Margin = Padding.Empty };
         sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 34));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 66));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
@@ -501,6 +571,10 @@ internal sealed class ChatForm : Form
         sidebar.Controls.Add(registrationButton, 0, 4);
         memberSummary = new Label { Text = "正在读取成员…", Dock = DockStyle.Fill, ForeColor = muted, Font = new Font(Font.FontFamily, 8.5F), TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
         sidebar.Controls.Add(memberSummary, 0, 5);
+        memberFilter = Identify(new TextBox { Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(0, 0, 0, 6), AccessibleName = "筛选成员名、模型或状态" }, "MemberFilter", "筛选成员名、模型或状态");
+        memberFilter.TextChanged += delegate { ApplyMemberFilter(); };
+        memberFilter.HandleCreated += delegate { SendMessage(memberFilter.Handle, 0x1501, (IntPtr)1, "筛选成员名 / 模型 / 状态"); };
+        sidebar.Controls.Add(memberFilter, 0, 6);
         var memberHost = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(245, 248, 251), Margin = new Padding(0, 2, 0, 8) };
         memberList = Identify(new BufferedPanel { Dock = DockStyle.Fill, AutoScroll = false, BackColor = Color.FromArgb(245, 248, 251), Margin = Padding.Empty }, "AgentList", "群成员列表");
         memberList.AccessibleRole = AccessibleRole.Pane;
@@ -514,7 +588,7 @@ internal sealed class ChatForm : Form
         memberHost.Controls.Add(memberEmpty);
         memberEmpty.BringToFront();
         memberHost.Resize += delegate { LayoutMemberScrollbar(); };
-        sidebar.Controls.Add(memberHost, 0, 6);
+        sidebar.Controls.Add(memberHost, 0, 7);
         var bulkActions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Padding = new Padding(0, 4, 0, 0), Margin = Padding.Empty };
         bulkApproveButton = MakeButton("BulkApproveButton", "全部批准", false);
         bulkApproveButton.AutoSize = false;
@@ -526,15 +600,18 @@ internal sealed class ChatForm : Form
         bulkRevokeButton.Margin = new Padding(0, 0, 0, 0);
         bulkActions.Controls.Add(bulkApproveButton);
         bulkActions.Controls.Add(bulkRevokeButton);
-        sidebar.Controls.Add(bulkActions, 0, 7);
-        sidebar.Controls.Add(new Label { Text = "禁言可读不可发 · 批量操作立即生效", Dock = DockStyle.Fill, ForeColor = muted, Font = new Font(Font.FontFamily, 8.5F), AutoEllipsis = true }, 0, 8);
+        sidebar.Controls.Add(bulkActions, 0, 8);
+        sidebar.Controls.Add(new Label { Text = "禁言可读不可发 · 批量操作立即生效 · 双击成员插入 @提及", Dock = DockStyle.Fill, ForeColor = muted, Font = new Font(Font.FontFamily, 8.5F), AutoEllipsis = true }, 0, 9);
+        memberToolTip = new ToolTip();
+        memberToolTip.SetToolTip(memberList, "双击成员可插入 @提及");
         return sidebar;
     }
 
     private Control BuildChat()
     {
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1, Margin = Padding.Empty };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, ColumnCount = 1, Margin = Padding.Empty };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 210));
         var collaboration = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 1, BackColor = Color.White, Padding = new Padding(20, 3, 10, 3) };
@@ -552,10 +629,25 @@ internal sealed class ChatForm : Form
         historyHost.Controls.Add(messageHistory);
         historyHost.Controls.Add(loadingOverlay);
         loadingOverlay.BringToFront();
-        layout.Controls.Add(historyHost, 0, 1);
-        var compose = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(24, 12, 24, 12), BackColor = Color.White, Margin = Padding.Empty };
+        pinnedBar = new Panel { Dock = DockStyle.Fill, Height = 32, Visible = false, BackColor = Color.FromArgb(255, 247, 237), Margin = new Padding(24, 6, 24, 0) };
+        var pinLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty, Padding = Padding.Empty };
+        pinLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        pinLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
+        pinnedLabel = Identify(new Label { Dock = DockStyle.Fill, AutoEllipsis = true, ForeColor = Color.FromArgb(146, 64, 14), TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(4, 0, 0, 0), Cursor = Cursors.Hand }, "PinnedMessageLabel", "置顶消息");
+        pinnedLabel.Click += async delegate { if (pinnedMessageId > 0 && activeConversationId > 0) await JumpToMessageAsync(activeConversationId, pinnedMessageId); };
+        pinnedUnpinButton = MakeToolbarButton("UnpinMessageButton", "取消置顶", false, 88);
+        pinnedUnpinButton.Dock = DockStyle.Fill;
+        pinnedUnpinButton.Margin = Padding.Empty;
+        pinnedUnpinButton.Click += async delegate { if (pinnedMessageId > 0) await SetPinnedAsync(pinnedMessageId, false); };
+        pinLayout.Controls.Add(pinnedLabel, 0, 0);
+        pinLayout.Controls.Add(pinnedUnpinButton, 1, 0);
+        pinnedBar.Controls.Add(pinLayout);
+        layout.Controls.Add(pinnedBar, 0, 1);
+        layout.Controls.Add(historyHost, 0, 2);
+        var compose = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(24, 12, 24, 12), BackColor = Color.White, Margin = Padding.Empty };
         compose.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         compose.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
+        compose.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         compose.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         compose.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         var targetRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
@@ -581,12 +673,26 @@ internal sealed class ChatForm : Form
         var inputFrame = new InputFrame { Dock = DockStyle.Fill, Padding = new Padding(10, 7, 10, 7), Margin = new Padding(0, 0, 0, 8), BackColor = Color.FromArgb(250, 252, 254) };
         messageInput = Identify(new TextBox { Multiline = true, AcceptsReturn = true, ScrollBars = ScrollBars.Vertical, MaxLength = 8000, Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, BackColor = inputFrame.BackColor, Font = new Font(Font.FontFamily, 10.5F), Margin = Padding.Empty }, "MessageInput", "消息内容");
         inputFrame.Controls.Add(messageInput);
-        compose.Controls.Add(inputFrame, 0, 2);
-        var sendRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Margin = Padding.Empty, Padding = Padding.Empty };
+        replyBar = new Panel { Dock = DockStyle.Fill, Height = 28, Visible = false, BackColor = Color.FromArgb(255, 247, 237), Margin = new Padding(0, 0, 0, 4) };
+        var replyLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty, Padding = Padding.Empty };
+        replyLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        replyLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 64));
+        replyLabel = new Label { Dock = DockStyle.Fill, AutoEllipsis = true, ForeColor = Color.FromArgb(146, 64, 14), TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(4, 0, 0, 0) };
+        replyCancelButton = MakeToolbarButton("CancelReplyButton", "取消", false, 60);
+        replyCancelButton.Dock = DockStyle.Fill;
+        replyCancelButton.Margin = Padding.Empty;
+        replyCancelButton.Click += delegate { ClearReplyTarget(); };
+        replyLayout.Controls.Add(replyLabel, 0, 0);
+        replyLayout.Controls.Add(replyCancelButton, 1, 0);
+        replyBar.Controls.Add(replyLayout);
+        compose.Controls.Add(replyBar, 0, 2);
+        compose.Controls.Add(inputFrame, 0, 3);
+        var sendRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, Margin = Padding.Empty, Padding = Padding.Empty };
         sendRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         sendRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         sendRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88));
         sendRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+        sendRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88));
         sendRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
         attachmentLabel = new Label { Text = "回车发送 / Ctrl+回车换行", Dock = DockStyle.Fill, ForeColor = muted, TextAlign = ContentAlignment.MiddleLeft, Margin = Padding.Empty, AutoEllipsis = true };
         attachmentLabel.Name = "AttachmentSummary";
@@ -604,31 +710,120 @@ internal sealed class ChatForm : Form
         sendRow.Controls.Add(clearAttachmentButton, 1, 0);
         attachmentButton = MakeToolbarButton("AttachmentButton", "附件", true, 88);
         attachmentButton.Dock = DockStyle.Fill;
-        attachmentButton.Margin = new Padding(0, 0, 12, 0);
+        attachmentButton.Margin = new Padding(0, 0, 8, 0);
         sendRow.Controls.Add(attachmentButton, 2, 0);
+        var toolsButton = MakeToolbarButton("GroupToolsButton", "群工具", true, 88);
+        toolsButton.Dock = DockStyle.Fill;
+        toolsButton.Margin = new Padding(0, 0, 8, 0);
+        toolsButton.Click += async delegate { await ShowGroupToolsAsync(); };
+        sendRow.Controls.Add(toolsButton, 3, 0);
         sendButton = MakeButton("SendButton", "发送", true);
         sendButton.MinimumSize = Size.Empty;
         sendButton.Dock = DockStyle.Fill;
         sendButton.Margin = Padding.Empty;
-        sendRow.Controls.Add(sendButton, 3, 0);
-        compose.Controls.Add(sendRow, 0, 3);
-        layout.Controls.Add(compose, 0, 2);
+        sendRow.Controls.Add(sendButton, 4, 0);
+        compose.Controls.Add(sendRow, 0, 4);
+        layout.Controls.Add(compose, 0, 3);
         return layout;
     }
 
 
     private Control BuildAudit()
     {
-        var panel = new Panel { Dock = DockStyle.Fill };
-        auditEmpty = new Label { Text = "正在读取审计…", Dock = DockStyle.Top, Height = 35, ForeColor = muted };
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = Padding.Empty };
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var tools = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        tools.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        tools.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+        auditFilter = Identify(new TextBox { Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(0, 0, 8, 4), MaxLength = 200 }, "AuditFilter", "筛选操作者、操作或对象");
+        auditFilter.TextChanged += delegate { ApplyAuditFilter(); };
+        auditFilter.HandleCreated += delegate { SendMessage(auditFilter.Handle, 0x1501, (IntPtr)1, "筛选操作者 / 操作 / 对象"); };
+        auditExportButton = MakeToolbarButton("AuditExportButton", "导出 CSV", false, 96);
+        auditExportButton.Dock = DockStyle.Fill;
+        auditExportButton.Margin = new Padding(0, 0, 0, 4);
+        auditExportButton.Click += delegate { ExportAuditCsv(); };
+        tools.Controls.Add(auditFilter, 0, 0);
+        tools.Controls.Add(auditExportButton, 1, 0);
+        auditEmpty = new Label { Text = "正在读取审计…", Dock = DockStyle.Fill, ForeColor = muted };
         auditList = MakeList("AuditList", "时间", "操作者", "操作", "对象");
         auditList.Columns[0].Width = 160;
         auditList.Columns[1].Width = 150;
         auditList.Columns[2].Width = 155;
         auditList.Columns[3].Width = 260;
-        panel.Controls.Add(auditList);
-        panel.Controls.Add(auditEmpty);
+        panel.Controls.Add(tools, 0, 0);
+        panel.Controls.Add(auditEmpty, 0, 1);
+        panel.Controls.Add(auditList, 0, 2);
         return panel;
+    }
+
+    private List<string[]> FilteredAuditRows()
+    {
+        string filter = auditFilter == null ? "" : auditFilter.Text.Trim();
+        if (filter.Length == 0) return auditRowsAll;
+        var result = new List<string[]>();
+        foreach (string[] row in auditRowsAll)
+        {
+            bool matches = false;
+            foreach (string value in row) if (value != null && value.IndexOf(filter, StringComparison.CurrentCultureIgnoreCase) >= 0) { matches = true; break; }
+            if (matches) result.Add(row);
+        }
+        return result;
+    }
+
+    private void ApplyAuditFilter()
+    {
+        if (auditList == null || auditList.IsDisposed) return;
+        var rows = FilteredAuditRows();
+        ReconcileList(auditList, rows);
+        bool filtering = auditFilter != null && auditFilter.Text.Trim().Length > 0;
+        auditEmpty.Text = rows.Count == 0 ? (filtering ? "没有匹配的审计记录。" : "暂无操作记录。") : "显示 " + rows.Count + " 条审计记录（服务最多提供最近 200 条）";
+    }
+
+    private void ExportAuditCsv()
+    {
+        var rows = FilteredAuditRows();
+        if (rows.Count == 0) return;
+        using (var dialog = new SaveFileDialog())
+        {
+            dialog.Title = "导出审计 CSV";
+            dialog.Filter = "CSV 文件 (*.csv)|*.csv|所有文件 (*.*)|*.*";
+            dialog.DefaultExt = "csv";
+            dialog.AddExtension = true;
+            dialog.OverwritePrompt = true;
+            dialog.FileName = "审计-" + DateTime.Now.ToString("yyyyMMdd-HHmm", CultureInfo.InvariantCulture) + ".csv";
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            try
+            {
+                int count = WriteAuditCsv(dialog.FileName);
+                SetStatus("已导出 " + count.ToString(CultureInfo.InvariantCulture) + " 条审计记录。", false);
+            }
+            catch (Exception ex)
+            {
+                if (!stopping) SetStatus("导出审计失败 · " + FriendlyError(ex), true);
+            }
+        }
+    }
+
+    private int WriteAuditCsv(string path)
+    {
+        var rows = FilteredAuditRows();
+        var csv = new StringBuilder();
+        csv.AppendLine("编号,时间,操作者,操作,对象");
+        foreach (string[] row in rows)
+        {
+            for (int index = 0; index < row.Length; index++)
+            {
+                if (index > 0) csv.Append(',');
+                string value = (row[index] ?? "").Replace("\"", "\"\"");
+                if (value.Length > 0 && "=+-@\t\r".IndexOf(value[0]) >= 0) value = "'" + value;
+                csv.Append('"').Append(value).Append('"');
+            }
+            csv.AppendLine();
+        }
+        System.IO.File.WriteAllText(path, csv.ToString(), new UTF8Encoding(true));
+        return rows.Count;
     }
 
     private void ShowAuditDialog()
@@ -638,10 +833,719 @@ internal sealed class ChatForm : Form
         auditDialog.Controls.Add(BuildAudit());
         auditList.Columns[0].Width = 165; auditList.Columns[1].Width = 140; auditList.Columns[2].Width = 150;
         auditList.Resize += delegate { if (auditList != null && !auditList.IsDisposed) auditList.Columns[3].Width = Math.Max(160, auditList.ClientSize.Width - 465); };
-        auditDialog.FormClosed += delegate { auditList = null; auditEmpty = null; auditDialog = null; };
+        auditDialog.FormClosed += delegate { auditList = null; auditEmpty = null; auditDialog = null; auditFilter = null; auditExportButton = null; auditRowsAll.Clear(); };
         WatchSystemPalette(auditDialog); UpdateSystemPalette(auditDialog);
         auditDialog.Show(this);
         if (!stopping) { var refresh = RefreshAsync(); }
+    }
+
+    private static string SafeFileName(string value)
+    {
+        string name = String.IsNullOrWhiteSpace(value) ? "对话" : value.Trim();
+        foreach (char invalid in System.IO.Path.GetInvalidFileNameChars()) name = name.Replace(invalid, '_');
+        return name.Length > 60 ? name.Substring(0, 60) : name;
+    }
+
+    private async Task ExportConversationAsync(long conversationId, string title)
+    {
+        if (conversationId <= 0 || stopping) return;
+        using (var dialog = new SaveFileDialog())
+        {
+            dialog.Title = "导出对话为 Markdown";
+            dialog.Filter = "Markdown 文档 (*.md)|*.md|所有文件 (*.*)|*.*";
+            dialog.DefaultExt = "md";
+            dialog.AddExtension = true;
+            dialog.OverwritePrompt = true;
+            dialog.FileName = SafeFileName(title) + "-" + DateTime.Now.ToString("yyyyMMdd-HHmm", CultureInfo.InvariantCulture) + ".md";
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            try
+            {
+                SetStatus("正在导出对话…", false);
+                int count = await WriteConversationMarkdownAsync(conversationId, title, dialog.FileName);
+                SetStatus("已导出 " + count.ToString(CultureInfo.InvariantCulture) + " 条消息。", false);
+            }
+            catch (Exception ex)
+            {
+                if (!stopping) SetStatus("导出失败 · " + FriendlyError(ex), true);
+            }
+        }
+    }
+
+    private async Task<int> WriteConversationMarkdownAsync(long conversationId, string title, string path)
+    {
+        var markdown = new StringBuilder();
+        markdown.AppendLine("# " + (String.IsNullOrWhiteSpace(title) ? "对话 " + conversationId.ToString(CultureInfo.InvariantCulture) : title.Trim()));
+        markdown.AppendLine();
+        markdown.AppendLine("- 对话 ID：" + conversationId.ToString(CultureInfo.InvariantCulture));
+        markdown.AppendLine("- 导出时间：" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture));
+        markdown.AppendLine();
+        long after = 0;
+        int total = 0;
+        bool truncated = false;
+        while (true)
+        {
+            Dictionary<string, object> page = await RequestAsync("api/messages?conversationId=" + conversationId.ToString(CultureInfo.InvariantCulture) + "&after=" + after.ToString(CultureInfo.InvariantCulture) + "&limit=200", null);
+            if (Number(page, "conversationId") != conversationId) throw new ChatClientException("导出期间对话已变化。");
+            var rows = new List<Dictionary<string, object>>(Rows(page, "messages"));
+            if (rows.Count == 0) break;
+            foreach (Dictionary<string, object> row in rows)
+            {
+                long messageId = Number(row, "id");
+                string sender = DisplayName(Value(row, "from"));
+                string to = Value(row, "to");
+                bool directed = row.ContainsKey("to") && !String.IsNullOrEmpty(to);
+                markdown.Append("### #").Append(messageId.ToString(CultureInfo.InvariantCulture)).Append(" · ").Append(DateText(Value(row, "createdAt"))).Append(" · ").Append(sender);
+                markdown.AppendLine(directed ? " → " + DisplayName(to) + "（定向，管理员可见）" : " · 广播");
+                long replyTo = Number(row, "replyTo");
+                if (replyTo > 0) markdown.AppendLine("回复 #" + replyTo.ToString(CultureInfo.InvariantCulture));
+                string text = Value(row, "text");
+                if (!String.IsNullOrWhiteSpace(text)) { markdown.AppendLine(); markdown.AppendLine(text.TrimEnd()); }
+                foreach (Dictionary<string, object> attachment in Rows(row, "attachments"))
+                {
+                    markdown.AppendLine();
+                    markdown.AppendLine("- 附件：" + Value(attachment, "name") + "（" + Value(attachment, "size") + " B）");
+                }
+                markdown.AppendLine();
+                total++;
+                if (total >= 20000) { truncated = true; break; }
+            }
+            long next = Number(page, "cursor");
+            if (next <= after || rows.Count < 200) break;
+            after = next;
+            if (truncated) break;
+        }
+        if (truncated) markdown.AppendLine("> 导出达到 20000 条上限，后续消息未包含。");
+        System.IO.File.WriteAllText(path, markdown.ToString(), new UTF8Encoding(false));
+        return total;
+    }
+
+    private async Task RenameConversationAsync(long conversationId, string title)
+    {
+        if (conversationId <= 0 || String.IsNullOrWhiteSpace(title) || mutating || stopping || !connected) return;
+        await MutateAsync("api/admin/conversations/" + conversationId.ToString(CultureInfo.InvariantCulture) + "/rename", new { title = title.Trim() }, "对话已重命名。", null);
+    }
+
+    private string PromptForText(string caption, string label, string initial, int maxLength)
+    {
+        using (var dialog = new Form
+        {
+            Text = caption,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowInTaskbar = false,
+            Font = Font,
+            ClientSize = new Size(420, 124),
+            Padding = new Padding(16),
+        })
+        {
+            var captionLabel = new Label { Text = label, Dock = DockStyle.Fill, ForeColor = ink, TextAlign = ContentAlignment.MiddleLeft };
+            var input = new TextBox { Text = initial, MaxLength = Math.Max(1, maxLength), Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 6) };
+            var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Margin = Padding.Empty };
+            var save = new Button { Text = "保存", DialogResult = DialogResult.OK, AutoSize = true, MinimumSize = new Size(76, 30) };
+            var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(76, 30) };
+            buttons.Controls.Add(save);
+            buttons.Controls.Add(cancel);
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = Padding.Empty };
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            layout.Controls.Add(captionLabel, 0, 0);
+            layout.Controls.Add(input, 0, 1);
+            layout.Controls.Add(buttons, 0, 2);
+            dialog.Controls.Add(layout);
+            dialog.AcceptButton = save;
+            dialog.CancelButton = cancel;
+            input.SelectAll();
+            input.Focus();
+            return dialog.ShowDialog(this) == DialogResult.OK ? input.Text.Trim() : null;
+        }
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return bytes.ToString(CultureInfo.InvariantCulture) + " B";
+        double value = bytes;
+        string[] units = { "KB", "MB", "GB", "TB" };
+        foreach (string unit in units)
+        {
+            value /= 1024d;
+            if (value < 1024d || unit == "TB") return value.ToString("0.0", CultureInfo.InvariantCulture) + " " + unit;
+        }
+        return bytes.ToString(CultureInfo.InvariantCulture) + " B";
+    }
+
+    private static string FormatDuration(long seconds)
+    {
+        long hours = seconds / 3600, minutes = (seconds % 3600) / 60, rest = seconds % 60;
+        if (hours > 0) return hours.ToString(CultureInfo.InvariantCulture) + " 小时 " + minutes.ToString(CultureInfo.InvariantCulture) + " 分";
+        if (minutes > 0) return minutes.ToString(CultureInfo.InvariantCulture) + " 分 " + rest.ToString(CultureInfo.InvariantCulture) + " 秒";
+        return rest.ToString(CultureInfo.InvariantCulture) + " 秒";
+    }
+
+    private async Task<Dictionary<string, object>> FetchHealthAsync()
+    {
+        return await RequestAsync("api/admin/health", null);
+    }
+
+    private static string FormatHealth(Dictionary<string, object> health)
+    {
+        Dictionary<string, object> counts = health.ContainsKey("counts") ? health["counts"] as Dictionary<string, object> : null;
+        Dictionary<string, object> memory = health.ContainsKey("memory") ? health["memory"] as Dictionary<string, object> : null;
+        var lines = new List<string>();
+        lines.Add("版本：" + Value(health, "version") + "　Node：" + Value(health, "node"));
+        lines.Add("端口：" + Value(health, "port") + "　运行：" + FormatDuration(Number(health, "uptimeSeconds")));
+        lines.Add("数据库：" + FormatBytes(Number(health, "databaseBytes")) + "　WAL：" + FormatBytes(Number(health, "walBytes")));
+        lines.Add("消息 revision：" + Value(health, "messageRevision"));
+        if (counts != null) lines.Add("成员：" + Value(counts, "agents") + "　消息：" + Value(counts, "messages") + "　任务：" + Value(counts, "tasks") + "　对话：" + Value(counts, "conversations") + "　附件：" + Value(counts, "attachments"));
+        if (memory != null) lines.Add("内存 RSS：" + FormatBytes(Number(memory, "rss")) + "　Heap：" + FormatBytes(Number(memory, "heapUsed")));
+        return String.Join(Environment.NewLine, lines.ToArray());
+    }
+
+    private async Task ShowHealthDialogAsync()
+    {
+        if (stopping) return;
+        var dialog = new Form { Name = "HealthDialog", Text = "服务状态", StartPosition = FormStartPosition.CenterParent, Size = new Size(560, 320), MinimumSize = new Size(460, 260), Font = Font, BackColor = Color.White, Padding = new Padding(16), ShowInTaskbar = false };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty };
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        var output = Identify(new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BorderStyle = BorderStyle.FixedSingle, BackColor = Color.FromArgb(250, 252, 254), Font = new Font(Font.FontFamily, 9.5F) }, "HealthOutput", "服务状态");
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Margin = Padding.Empty };
+        var close = new Button { Text = "关闭", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(76, 30) };
+        var refresh = new Button { Text = "刷新", AutoSize = true, MinimumSize = new Size(76, 30) };
+        buttons.Controls.Add(close);
+        buttons.Controls.Add(refresh);
+        layout.Controls.Add(output, 0, 0);
+        layout.Controls.Add(buttons, 0, 1);
+        dialog.Controls.Add(layout);
+        dialog.CancelButton = close;
+        Func<System.Threading.Tasks.Task> load = async delegate
+        {
+            try
+            {
+                string text = FormatHealth(await FetchHealthAsync());
+                if (!output.IsDisposed) output.Text = text;
+            }
+            catch (Exception ex)
+            {
+                if (!output.IsDisposed) output.Text = "读取失败：" + FriendlyError(ex);
+            }
+        };
+        refresh.Click += async delegate { await load(); };
+        WatchSystemPalette(dialog);
+        UpdateSystemPalette(dialog);
+        dialog.FormClosed += delegate { dialog.Dispose(); };
+        dialog.Show(this);
+        await load();
+    }
+
+    private static string TaskStatusText(string status)
+    {
+        switch (status)
+        {
+            case "open": return "待认领";
+            case "claimed": return "已认领";
+            case "done": return "已完成";
+            default: return status;
+        }
+    }
+
+    private async Task ShowTasksDialogAsync()
+    {
+        if (taskDialog != null && !taskDialog.IsDisposed) { taskDialog.Activate(); await LoadTasksAsync(); return; }
+        taskDialog = new Form { Name = "TasksDialog", Text = "协作任务", StartPosition = FormStartPosition.CenterParent, Size = new Size(880, 620), MinimumSize = new Size(680, 480), Font = Font, BackColor = Color.White, Padding = new Padding(16), ShowInTaskbar = false };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Margin = Padding.Empty };
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+
+        var createRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0, 0, 0, 4) };
+        createRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        createRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88));
+        taskTitleInput = Identify(new TextBox { Dock = DockStyle.Fill, MaxLength = 160, Margin = new Padding(0, 0, 8, 0) }, "TaskTitleInput", "任务标题");
+        var createButton = MakeButton("TaskCreateButton", "创建任务", true);
+        createButton.Dock = DockStyle.Fill;
+        createButton.Margin = new Padding(0, 0, 0, 0);
+        createButton.Click += async delegate { await CreateTaskAsync(taskTitleInput.Text, taskDescriptionInput.Text); };
+        createRow.Controls.Add(taskTitleInput, 0, 0);
+        createRow.Controls.Add(createButton, 1, 0);
+
+        taskDescriptionInput = Identify(new TextBox { Dock = DockStyle.Fill, Multiline = true, MaxLength = 8000, ScrollBars = ScrollBars.Vertical, Margin = new Padding(0, 0, 0, 6) }, "TaskDescriptionInput", "任务说明（可选）");
+
+        taskList = Identify(new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false, BorderStyle = BorderStyle.FixedSingle }, "TaskList", "任务列表");
+        taskList.Columns.Add("#", 54, HorizontalAlignment.Right);
+        taskList.Columns.Add("标题", 300);
+        taskList.Columns.Add("状态", 80);
+        taskList.Columns.Add("负责人", 120);
+        taskList.Columns.Add("更新", 150);
+        taskList.SelectedIndexChanged += delegate { UpdateTaskSelection(); };
+        taskList.Resize += delegate { if (taskList != null && taskList.Columns.Count > 1) taskList.Columns[1].Width = Math.Max(160, taskList.ClientSize.Width - 520); };
+        taskDetail = new Label { Dock = DockStyle.Fill, AutoEllipsis = true, ForeColor = muted, TextAlign = ContentAlignment.MiddleLeft, Text = "选择任务查看详情。" };
+        taskNoteInput = Identify(new TextBox { Dock = DockStyle.Fill, Multiline = true, MaxLength = 8000, ScrollBars = ScrollBars.Vertical, Margin = new Padding(0, 0, 0, 6) }, "TaskNoteInput", "本次操作备注（可选）");
+        taskNoteInput.Text = "";
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty };
+        taskClaimButton = MakeToolbarButton("TaskClaimButton", "认领", false, 74);
+        taskClaimButton.Click += async delegate { await ChangeTaskAsync("claim"); };
+        taskReleaseButton = MakeToolbarButton("TaskReleaseButton", "释放", false, 74);
+        taskReleaseButton.Click += async delegate { await ChangeTaskAsync("release"); };
+        taskCompleteButton = MakeToolbarButton("TaskCompleteButton", "完成", true, 74);
+        taskCompleteButton.Click += async delegate { await ChangeTaskAsync("complete"); };
+        taskReopenButton = MakeToolbarButton("TaskReopenButton", "重新打开", false, 92);
+        taskReopenButton.Click += async delegate { await ChangeTaskAsync("reopen"); };
+        taskAssignButton = MakeToolbarButton("TaskAssignButton", "指派", false, 74);
+        taskAssignButton.Click += async delegate { await AssignSelectedTaskAsync(); };
+        taskDeleteButton = MakeToolbarButton("TaskDeleteButton", "删除", false, 74);
+        taskDeleteButton.Click += async delegate { await DeleteSelectedTaskAsync(); };
+        var refresh = MakeToolbarButton("TaskRefreshButton", "刷新", false, 74);
+        refresh.Click += async delegate { await LoadTasksAsync(); };
+        var close = MakeToolbarButton("TaskCloseButton", "关闭", false, 74);
+        close.Margin = Padding.Empty;
+        close.Click += delegate { if (taskDialog != null) taskDialog.Close(); };
+        actions.Controls.Add(taskClaimButton);
+        actions.Controls.Add(taskReleaseButton);
+        actions.Controls.Add(taskCompleteButton);
+        actions.Controls.Add(taskReopenButton);
+        actions.Controls.Add(taskAssignButton);
+        actions.Controls.Add(taskDeleteButton);
+        actions.Controls.Add(refresh);
+        actions.Controls.Add(close);
+
+        taskDialogTitle = new Label { Dock = DockStyle.Fill, ForeColor = muted, TextAlign = ContentAlignment.MiddleLeft, Text = "当前对话任务" };
+        var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty };
+        header.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+        header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        header.Controls.Add(taskDialogTitle, 0, 0);
+        header.Controls.Add(createRow, 0, 1);
+        layout.Controls.Add(header, 0, 0);
+        layout.Controls.Add(taskDescriptionInput, 0, 1);
+        layout.Controls.Add(taskList, 0, 2);
+        layout.Controls.Add(taskDetail, 0, 3);
+        layout.Controls.Add(taskNoteInput, 0, 4);
+        layout.Controls.Add(actions, 0, 5);
+        taskDialog.Controls.Add(layout);
+        taskDialog.FormClosed += delegate { taskDialog = null; taskList = null; taskTitleInput = null; taskDescriptionInput = null; taskNoteInput = null; taskDetail = null; taskDialogTitle = null; taskClaimButton = null; taskReleaseButton = null; taskCompleteButton = null; taskReopenButton = null; taskAssignButton = null; taskDeleteButton = null; taskRowsById.Clear(); };
+        taskDialog.Activated += async delegate { if (taskDialog != null && activeConversationId != taskDialogConversationId) await LoadTasksAsync(); };
+        WatchSystemPalette(taskDialog);
+        UpdateSystemPalette(taskDialog);
+        await LoadTasksAsync();
+        taskDialog.Show(this);
+        taskTitleInput.Focus();
+    }
+
+    private async Task LoadTasksAsync()
+    {
+        if (taskList == null || taskList.IsDisposed || activeConversationId <= 0) return;
+        long conversationId = activeConversationId;
+        try
+        {
+            Dictionary<string, object> page = await RequestAsync("api/tasks?conversationId=" + conversationId.ToString(CultureInfo.InvariantCulture), null);
+            if (taskList == null || taskList.IsDisposed) return;
+            taskDialogConversationId = conversationId;
+            taskDialogTitle.Text = "当前对话任务 · " + groupTitle.Text;
+            long selectedId = 0;
+            if (taskList.SelectedItems.Count > 0) Int64.TryParse(taskList.SelectedItems[0].Name, NumberStyles.None, CultureInfo.InvariantCulture, out selectedId);
+            taskRowsById.Clear();
+            taskList.BeginUpdate();
+            try
+            {
+                taskList.Items.Clear();
+                foreach (Dictionary<string, object> task in Rows(page, "tasks"))
+                {
+                    long id = Number(task, "id");
+                    taskRowsById[id] = task;
+                    var item = new ListViewItem("#" + id.ToString(CultureInfo.InvariantCulture)) { Name = id.ToString(CultureInfo.InvariantCulture) };
+                    item.SubItems.Add(Value(task, "title"));
+                    item.SubItems.Add(TaskStatusText(Value(task, "status")));
+                    string owner = Value(task, "owner");
+                    item.SubItems.Add(String.IsNullOrEmpty(owner) ? "未认领" : DisplayName(owner));
+                    item.SubItems.Add(DateText(Value(task, "updatedAt")));
+                    taskList.Items.Add(item);
+                }
+            }
+            finally { taskList.EndUpdate(); }
+            if (selectedId > 0 && taskList.Items.ContainsKey(selectedId.ToString(CultureInfo.InvariantCulture))) taskList.Items[selectedId.ToString(CultureInfo.InvariantCulture)].Selected = true;
+            UpdateTaskSelection();
+        }
+        catch (Exception ex)
+        {
+            if (taskDetail != null && !taskDetail.IsDisposed) taskDetail.Text = "任务加载失败：" + FriendlyError(ex);
+        }
+    }
+
+    private void UpdateTaskSelection()
+    {
+        bool has = taskList != null && taskList.SelectedItems.Count > 0;
+        Dictionary<string, object> task = null;
+        if (has)
+        {
+            long id;
+            if (Int64.TryParse(taskList.SelectedItems[0].Name, NumberStyles.None, CultureInfo.InvariantCulture, out id)) taskRowsById.TryGetValue(id, out task);
+        }
+        string status = task == null ? "" : Value(task, "status");
+        if (taskClaimButton != null) taskClaimButton.Enabled = status == "open";
+        if (taskReleaseButton != null) taskReleaseButton.Enabled = status == "claimed";
+        if (taskCompleteButton != null) taskCompleteButton.Enabled = status == "claimed";
+        if (taskReopenButton != null) taskReopenButton.Enabled = status == "done";
+        if (taskAssignButton != null) taskAssignButton.Enabled = status == "open" || status == "claimed";
+        if (taskDeleteButton != null) taskDeleteButton.Enabled = task != null;
+        if (taskDetail != null)
+        {
+            if (task == null) taskDetail.Text = "选择任务查看详情。";
+            else
+            {
+                string description = Value(task, "description");
+                string note = Value(task, "note");
+                taskDetail.Text = "创建：" + DisplayName(Value(task, "createdBy")) + " · 更新：" + DateText(Value(task, "updatedAt")) + (description.Length > 0 ? "　描述：" + Snippet(description, 80) : "") + (note.Length > 0 ? "　最新备注：" + Snippet(note, 60) : "");
+                taskDetail.AccessibleName = taskDetail.Text;
+            }
+        }
+    }
+
+    private async Task CreateTaskAsync(string title, string description)
+    {
+        if (String.IsNullOrWhiteSpace(title) || stopping || activeConversationId <= 0) return;
+        try
+        {
+            await RequestAsync("api/tasks", new { title = title.Trim(), description = description ?? "", conversationId = activeConversationId });
+            if (taskTitleInput != null) taskTitleInput.Clear();
+            if (taskDescriptionInput != null) taskDescriptionInput.Clear();
+            await LoadTasksAsync();
+            SetStatus("任务已创建。", false);
+        }
+        catch (Exception ex)
+        {
+            if (!stopping) MessageBox.Show(this, FriendlyError(ex), "创建任务失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private async Task AssignSelectedTaskAsync()
+    {
+        if (taskList == null || taskList.SelectedItems.Count == 0 || stopping) return;
+        long id;
+        if (!Int64.TryParse(taskList.SelectedItems[0].Name, NumberStyles.None, CultureInfo.InvariantCulture, out id)) return;
+        var members = new List<KeyValuePair<string, string>>();
+        foreach (AgentData agent in agents.Values) if (agent.Status == "active") members.Add(new KeyValuePair<string, string>(agent.Id, agent.Name));
+        if (members.Count == 0)
+        {
+            MessageBox.Show(this, "当前没有可指派的已批准成员。", "指派任务", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        members.Sort(delegate(KeyValuePair<string, string> left, KeyValuePair<string, string> right) { return StringComparer.CurrentCultureIgnoreCase.Compare(left.Value, right.Value); });
+        Dictionary<string, object> task;
+        string currentOwner = taskRowsById.TryGetValue(id, out task) ? Value(task, "owner") : "";
+        string ownerId = PromptForMember("指派任务 #" + id.ToString(CultureInfo.InvariantCulture), members, currentOwner);
+        if (String.IsNullOrEmpty(ownerId)) return;
+        await AssignTaskAsync(id, ownerId);
+    }
+
+    private string PromptForMember(string caption, List<KeyValuePair<string, string>> members, string selectedId)
+    {
+        using (var dialog = new Form
+        {
+            Text = caption,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowInTaskbar = false,
+            Font = Font,
+            ClientSize = new Size(400, 136),
+            Padding = new Padding(16),
+        })
+        {
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = Padding.Empty };
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            var label = new Label { Text = "选择负责成员", Dock = DockStyle.Fill, ForeColor = ink, TextAlign = ContentAlignment.MiddleLeft };
+            var combo = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, DisplayMember = "Value", ValueMember = "Key", DataSource = members };
+            for (int index = 0; index < members.Count; index++) if (members[index].Key == selectedId) combo.SelectedIndex = index;
+            if (combo.SelectedIndex < 0) combo.SelectedIndex = 0;
+            var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Margin = Padding.Empty };
+            var save = new Button { Text = "指派", DialogResult = DialogResult.OK, AutoSize = true, MinimumSize = new Size(76, 30) };
+            var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(76, 30) };
+            buttons.Controls.Add(save);
+            buttons.Controls.Add(cancel);
+            layout.Controls.Add(label, 0, 0);
+            layout.Controls.Add(combo, 0, 1);
+            layout.Controls.Add(buttons, 0, 2);
+            dialog.Controls.Add(layout);
+            dialog.AcceptButton = save;
+            dialog.CancelButton = cancel;
+            return dialog.ShowDialog(this) == DialogResult.OK && combo.SelectedValue is string ? (string)combo.SelectedValue : null;
+        }
+    }
+
+    private async Task AssignTaskAsync(long taskId, string ownerId)
+    {
+        if (taskId <= 0 || String.IsNullOrEmpty(ownerId) || stopping) return;
+        try
+        {
+            await RequestAsync("api/admin/tasks/" + taskId.ToString(CultureInfo.InvariantCulture) + "/assign", new { owner = ownerId });
+            await LoadTasksAsync();
+            SetStatus("任务已指派。", false);
+        }
+        catch (Exception ex)
+        {
+            if (!stopping) MessageBox.Show(this, FriendlyError(ex), "指派任务失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private async Task DeleteSelectedTaskAsync()
+    {
+        if (taskList == null || taskList.SelectedItems.Count == 0 || stopping) return;
+        long id;
+        if (!Int64.TryParse(taskList.SelectedItems[0].Name, NumberStyles.None, CultureInfo.InvariantCulture, out id)) return;
+        string title = taskList.SelectedItems[0].SubItems.Count > 1 ? taskList.SelectedItems[0].SubItems[1].Text : "";
+        if (MessageBox.Show(this, "删除任务 #" + id.ToString(CultureInfo.InvariantCulture) + (String.IsNullOrEmpty(title) ? "？" : "「" + title + "」？") + "\r\n删除后不可恢复。", "删除任务", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        await DeleteTaskAsync(id);
+    }
+
+    private async Task DeleteTaskAsync(long id)
+    {
+        if (id <= 0 || stopping) return;
+        try
+        {
+            await RequestAsync("api/admin/tasks/" + id.ToString(CultureInfo.InvariantCulture) + "/delete", new { });
+            await LoadTasksAsync();
+            SetStatus("任务已删除。", false);
+        }
+        catch (Exception ex)
+        {
+            if (!stopping) MessageBox.Show(this, FriendlyError(ex), "删除任务失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private async Task ChangeTaskAsync(string action)
+    {
+        if (taskList == null || taskList.SelectedItems.Count == 0 || stopping) return;
+        long id;
+        if (!Int64.TryParse(taskList.SelectedItems[0].Name, NumberStyles.None, CultureInfo.InvariantCulture, out id)) return;
+        try
+        {
+            string note = taskNoteInput == null ? "" : taskNoteInput.Text;
+            await RequestAsync("api/tasks/" + id.ToString(CultureInfo.InvariantCulture), new { action, note, conversationId = activeConversationId });
+            if (taskNoteInput != null) taskNoteInput.Clear();
+            await LoadTasksAsync();
+            SetStatus("任务已更新。", false);
+        }
+        catch (Exception ex)
+        {
+            if (!stopping) MessageBox.Show(this, FriendlyError(ex), "任务操作失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void ShowSearchDialog(string presetSender = null)
+    {
+        if (searchDialog != null && !searchDialog.IsDisposed) { searchDialog.Activate(); if (searchInput != null) searchInput.Focus(); return; }
+        searchDialog = new Form { Name = "SearchDialog", Text = "搜索消息", StartPosition = FormStartPosition.CenterParent, Size = new Size(760, 520), MinimumSize = new Size(560, 340), Font = Font, BackColor = Color.White, Padding = new Padding(18), ShowInTaskbar = false };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = Padding.Empty };
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        var bar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Margin = Padding.Empty };
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88));
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+        searchInput = Identify(new TextBox { Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(0, 0, 8, 4), MaxLength = 200 }, "SearchInput", "搜索关键词");
+        searchSender = Identify(new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 0, 8, 4), DisplayMember = "Value", ValueMember = "Key" }, "SearchSender", "发送者筛选");
+        var senders = new List<KeyValuePair<string, string>>();
+        senders.Add(new KeyValuePair<string, string>("", "全部成员"));
+        senders.Add(new KeyValuePair<string, string>("admin", "管理员"));
+        foreach (AgentData agent in agents.Values) if (agent.Status != "revoked") senders.Add(new KeyValuePair<string, string>(agent.Id, agent.Name));
+        senders.Sort(delegate(KeyValuePair<string, string> left, KeyValuePair<string, string> right) { return StringComparer.CurrentCultureIgnoreCase.Compare(left.Value, right.Value); });
+        searchSender.DataSource = senders;
+        int allSendersIndex = senders.FindIndex(delegate(KeyValuePair<string, string> item) { return item.Key.Length == 0; });
+        if (allSendersIndex >= 0) searchSender.SelectedIndex = allSendersIndex;
+        var go = MakeButton("SearchGoButton", "搜索", true);
+        go.Dock = DockStyle.Fill;
+        go.Margin = new Padding(0, 0, 8, 4);
+        go.Click += async delegate { await SearchMessagesAsync(); };
+        var close = MakeButton("SearchCloseButton", "关闭", false);
+        close.Dock = DockStyle.Fill;
+        close.Margin = new Padding(0, 0, 0, 4);
+        close.Click += delegate { if (searchDialog != null) searchDialog.Close(); };
+        bar.Controls.Add(searchInput, 0, 0);
+        bar.Controls.Add(searchSender, 1, 0);
+        bar.Controls.Add(go, 2, 0);
+        bar.Controls.Add(close, 3, 0);
+        var host = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+        searchResults = Identify(new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false, BorderStyle = BorderStyle.FixedSingle }, "SearchResults", "搜索结果");
+        searchResults.Columns.Add("时间", 140);
+        searchResults.Columns.Add("发送者", 150);
+        searchResults.Columns.Add("摘要", 380);
+        searchResults.Columns.Add("#", 60, HorizontalAlignment.Right);
+        searchResults.DoubleClick += async delegate { await OpenSearchSelectionAsync(); };
+        searchResults.KeyDown += async delegate(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await OpenSearchSelectionAsync(); } };
+        searchEmpty = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = muted, Text = "输入关键词搜索当前对话；双击结果定位。", BackColor = Color.FromArgb(246, 248, 251) };
+        host.Controls.Add(searchResults);
+        host.Controls.Add(searchEmpty);
+        searchEmpty.BringToFront();
+        var hint = new Label { Dock = DockStyle.Fill, ForeColor = muted, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, Text = "搜索当前对话内可见消息（最多 100 条）；@ 与私信按当前身份可见范围过滤。" };
+        layout.Controls.Add(bar, 0, 0);
+        layout.Controls.Add(host, 0, 1);
+        layout.Controls.Add(hint, 0, 2);
+        searchDialog.Controls.Add(layout);
+        searchDialog.FormClosed += delegate { searchDialog = null; searchInput = null; searchSender = null; searchResults = null; searchEmpty = null; };
+        searchInput.KeyDown += async delegate(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await SearchMessagesAsync(); } };
+        WatchSystemPalette(searchDialog);
+        UpdateSystemPalette(searchDialog);
+        searchDialog.Show(this);
+        searchInput.Focus();
+        if (!String.IsNullOrEmpty(presetSender) && searchSender != null)
+        {
+            searchSender.SelectedValue = presetSender;
+            var ignored = SearchMessagesAsync();
+        }
+    }
+
+    private async Task SearchMessagesAsync()
+    {
+        if (searchInput == null || searchResults == null || searchEmpty == null || stopping) return;
+        string query = searchInput.Text.Trim();
+        string senderValue = searchSender == null || searchSender.SelectedValue == null ? "" : Convert.ToString(searchSender.SelectedValue, CultureInfo.InvariantCulture);
+        if (query.Length == 0 && String.IsNullOrEmpty(senderValue)) return;
+        long conversationId = activeConversationId;
+        if (conversationId <= 0) return;
+        try
+        {
+            string fromValue = senderValue;
+            string fromQuery = String.IsNullOrEmpty(fromValue) ? "" : "&from=" + Uri.EscapeDataString(fromValue);
+            Dictionary<string, object> page = await RequestAsync("api/messages/search?conversationId=" + conversationId.ToString(CultureInfo.InvariantCulture) + "&q=" + Uri.EscapeDataString(query) + fromQuery + "&limit=100", null);
+            if (searchDialog == null || searchDialog.IsDisposed) return;
+            if (Number(page, "conversationId") != conversationId)
+            {
+                searchEmpty.Text = "对话已切换，请重新搜索。";
+                searchEmpty.Visible = true;
+                return;
+            }
+            searchConversationId = conversationId;
+            searchResults.BeginUpdate();
+            try
+            {
+                searchResults.Items.Clear();
+                foreach (Dictionary<string, object> row in Rows(page, "messages"))
+                {
+                    var item = new ListViewItem(DateText(Value(row, "createdAt"))) { Name = Value(row, "id") };
+                    item.SubItems.Add(DisplayName(Value(row, "from")));
+                    item.SubItems.Add(Snippet(Value(row, "text"), 100));
+                    item.SubItems.Add("#" + Value(row, "id"));
+                    searchResults.Items.Add(item);
+                }
+            }
+            finally { searchResults.EndUpdate(); }
+            searchEmpty.Text = searchResults.Items.Count == 0 ? "没有匹配的消息。" : "";
+            searchEmpty.Visible = searchResults.Items.Count == 0;
+        }
+        catch (Exception ex)
+        {
+            if (searchEmpty != null && !searchEmpty.IsDisposed)
+            {
+                searchEmpty.Text = "搜索失败：" + FriendlyError(ex);
+                searchEmpty.Visible = true;
+            }
+        }
+    }
+
+    private async Task OpenSearchSelectionAsync()
+    {
+        if (searchResults == null || searchResults.SelectedItems.Count == 0) return;
+        long messageId;
+        if (!Int64.TryParse(searchResults.SelectedItems[0].Name, NumberStyles.None, CultureInfo.InvariantCulture, out messageId)) return;
+        long conversationId = searchConversationId;
+        if (searchDialog != null && !searchDialog.IsDisposed) searchDialog.Close();
+        await JumpToMessageAsync(conversationId, messageId);
+    }
+
+    private async Task JumpToMessageAsync(long conversationId, long messageId)
+    {
+        if (conversationId <= 0 || messageId <= 0 || stopping || loadingHistory) return;
+        if (conversationId != activeConversationId)
+        {
+            await ChangeConversationAsync(conversationId);
+            if (conversationId != activeConversationId) return;
+        }
+        loadingHistory = true;
+        try
+        {
+            Dictionary<string, object> page = await RequestAsync("api/messages?conversationId=" + conversationId.ToString(CultureInfo.InvariantCulture) + "&before=" + (messageId + 1).ToString(CultureInfo.InvariantCulture) + "&limit=20", null);
+            if (activeConversationId != conversationId || Number(page, "conversationId") != conversationId) return;
+            var rows = new List<Dictionary<string, object>>();
+            foreach (Dictionary<string, object> item in Rows(page, "messages"))
+            {
+                if (Number(item, "conversationId") != conversationId) throw new ChatClientException("搜索结果所属对话不一致。");
+                rows.Add(item);
+            }
+            if (rows.Count == 0)
+            {
+                SetStatus("未找到该消息，可能已被删除。", true);
+                return;
+            }
+            foreach (MessageRow row in messageRows) { messageHistory.Controls.Remove(row); row.Dispose(); }
+            messageRows.Clear();
+            long savedCursor = cursor;
+            int savedCount = messageCount, transcriptLength = transcript.Length;
+            suppressAttention = true;
+            cursor = 0;
+            try { AppendMessages(rows); }
+            finally
+            {
+                cursor = savedCursor;
+                messageCount = savedCount;
+                transcript.Length = transcriptLength;
+                messageHistory.AccessibleName = transcript.ToString();
+                pendingOwnMessage = false;
+                messagesPendingLayout = false;
+            }
+            browsingHistory = true;
+            long earliest = Number(page, "earliest_available_id");
+            hiddenMessages = rows.Count > 0 && (earliest <= 0 || Number(rows[0], "id") > earliest) ? 1 : 0;
+            LayoutMessages(true);
+            SetStatus("已定位到消息 #" + messageId.ToString(CultureInfo.InvariantCulture) + "。", false);
+        }
+        catch (Exception ex)
+        {
+            if (!stopping) SetStatus("定位消息失败 · " + FriendlyError(ex), true);
+        }
+        finally { loadingHistory = false; suppressAttention = false; }
+    }
+
+    private void NoteNewMessages(int count)
+    {
+        if (count <= 0 || suppressAttention || IsDisposed) return;
+        attentionCount += count;
+        if (!ContainsFocus || WindowState == FormWindowState.Minimized) UpdateAttention();
+        else ClearAttention();
+    }
+
+    private void UpdateAttention()
+    {
+        if (attentionCount <= 0) return;
+        string title = baseTitle + " (" + attentionCount.ToString(CultureInfo.InvariantCulture) + ")";
+        if (Text != title) Text = title;
+        if (!attentionFlashing && IsHandleCreated)
+        {
+            var info = new FLASHWINFO { Size = (uint)Marshal.SizeOf(typeof(FLASHWINFO)), Handle = Handle, Flags = FLASHW_TRAY | FLASHW_TIMERNOFG, Count = 0, Timeout = 0 };
+            FlashWindowEx(ref info);
+            attentionFlashing = true;
+        }
+    }
+
+    private void ClearAttention()
+    {
+        attentionCount = 0;
+        if (Text != baseTitle) Text = baseTitle;
+        if (attentionFlashing && IsHandleCreated)
+        {
+            var info = new FLASHWINFO { Size = (uint)Marshal.SizeOf(typeof(FLASHWINFO)), Handle = Handle, Flags = FLASHW_STOP, Count = 0, Timeout = 0 };
+            FlashWindowEx(ref info);
+        }
+        attentionFlashing = false;
     }
 
     private void WireEvents()
@@ -657,6 +1561,7 @@ internal sealed class ChatForm : Form
             try { await RefreshAsync(); if (!String.IsNullOrEmpty(restoredWarning)) { errorLabel.Text = restoredWarning; errorLabel.AccessibleName = restoredWarning; errorLabel.Visible = true; } } finally { SetConversationLoading(false, null); }
         };
         poll.Tick += async delegate { await RefreshAsync(); };
+        Activated += delegate { ClearAttention(); };
         newConversationButton.Click += async delegate { await ChangeConversationAsync(0); };
         conversationList.SelectedIndexChanged += async delegate
         {
@@ -665,8 +1570,38 @@ internal sealed class ChatForm : Form
             if (Int64.TryParse(conversationList.SelectedItems[0].Name, NumberStyles.None, CultureInfo.InvariantCulture, out id) && id != activeConversationId)
                 await ChangeConversationAsync(id);
         };
+        conversationList.MouseUp += delegate(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Right || mutating || stopping || !connected) return;
+            ListViewItem item = conversationList.GetItemAt(e.X, e.Y);
+            if (item == null) return;
+            long id;
+            if (!Int64.TryParse(item.Name, NumberStyles.None, CultureInfo.InvariantCulture, out id)) return;
+            string current = item.Text.StartsWith("● ", StringComparison.Ordinal) ? item.Text.Substring(2) : item.Text;
+            var menu = new ContextMenuStrip();
+            menu.Items.Add("重命名对话", null, async delegate
+            {
+                string title = PromptForText("重命名对话", "新的对话标题", current, 80);
+                if (!String.IsNullOrWhiteSpace(title)) await RenameConversationAsync(id, title);
+            });
+            menu.Items.Add("导出对话为 Markdown…", null, async delegate { await ExportConversationAsync(id, current); });
+            menu.Closed += delegate { menu.Dispose(); };
+            menu.Show(conversationList, e.Location);
+        };
         recipientBox.SelectedIndexChanged += delegate { UpdateButtons(); };
-        messageInput.TextChanged += delegate { UpdateButtons(); };
+        messageInput.TextChanged += delegate { UpdateButtons(); if (!mentionInserting) UpdateMentionMenu(); };
+        messageInput.Leave += delegate
+        {
+            if (IsDisposed || Disposing) return;
+            try
+            {
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    if (mentionList != null && !mentionList.Focused && !mentionList.ContainsFocus) HideMentionMenu();
+                });
+            }
+            catch (InvalidOperationException) { }
+        };
         registrationButton.Click += async delegate { await MutateAsync("api/admin/registration", new { open = !registrationOpen }, "登记状态已更新。", null); };
         bulkApproveButton.Click += async delegate { await BulkChangeAgentsAsync("approve"); };
         bulkRevokeButton.Click += async delegate
@@ -680,6 +1615,7 @@ internal sealed class ChatForm : Form
         attachmentButton.Click += delegate { SelectAttachments(); };
         messageInput.KeyDown += async delegate(object sender, KeyEventArgs e)
         {
+            if (HandleMentionKey(e)) return;
             if (e.KeyCode != Keys.Enter || e.Alt || e.Shift) return;
             e.SuppressKeyPress = true;
             if (e.Control)
@@ -687,6 +1623,198 @@ internal sealed class ChatForm : Form
             else if (sendButton.Enabled)
                 await SendMessageAsync();
         };
+    }
+
+    private void EnsureMentionList()
+    {
+        if (mentionList != null) return;
+        mentionList = new ListBox
+        {
+            Visible = false,
+            IntegralHeight = false,
+            BorderStyle = BorderStyle.FixedSingle,
+            Font = new Font("Microsoft YaHei UI", 9F),
+            AccessibleName = "提及成员建议",
+        };
+        mentionList.MouseDown += delegate(object sender, MouseEventArgs e)
+        {
+            int index = mentionList.IndexFromPoint(e.Location);
+            if (index >= 0 && index < mentionList.Items.Count)
+            {
+                mentionList.SelectedIndex = index;
+                InsertMention();
+            }
+        };
+        Controls.Add(mentionList);
+        mentionList.BringToFront();
+    }
+
+    private void HideMentionMenu()
+    {
+        if (mentionList != null) mentionList.Visible = false;
+        mentionStart = -1;
+    }
+
+    private void UpdateMentionMenu()
+    {
+        EnsureMentionList();
+        if (stopping || !messageInput.Focused || !messageInput.Enabled)
+        {
+            HideMentionMenu();
+            return;
+        }
+        string text = messageInput.Text;
+        int caret = messageInput.SelectionStart;
+        int at = caret > 0 ? text.LastIndexOf('@', caret - 1) : -1;
+        if (at < 0 || caret - at > 24 || (at > 0 && !Char.IsWhiteSpace(text[at - 1])))
+        {
+            HideMentionMenu();
+            return;
+        }
+        string fragment = text.Substring(at + 1, caret - at - 1);
+        if (fragment.IndexOf('\n') >= 0 || fragment.IndexOf('\r') >= 0 || fragment.IndexOf('\t') >= 0)
+        {
+            HideMentionMenu();
+            return;
+        }
+        var names = new List<string>();
+        foreach (AgentData agent in agents.Values)
+        {
+            if (agent.Status != "active" || agent.Name.Length == 0) continue;
+            if (fragment.Length == 0 || agent.Name.IndexOf(fragment, StringComparison.CurrentCultureIgnoreCase) >= 0) names.Add(agent.Name);
+        }
+        names.Sort(StringComparer.CurrentCultureIgnoreCase);
+        while (names.Count > 6) names.RemoveAt(names.Count - 1);
+        if (names.Count == 0)
+        {
+            HideMentionMenu();
+            return;
+        }
+        mentionStart = at;
+        mentionList.BeginUpdate();
+        try
+        {
+            mentionList.Items.Clear();
+            foreach (string name in names) mentionList.Items.Add(name);
+        }
+        finally { mentionList.EndUpdate(); }
+        mentionList.SelectedIndex = 0;
+        PositionMentionMenu();
+        mentionList.Visible = true;
+    }
+
+    private void PositionMentionMenu()
+    {
+        int caret = messageInput.SelectionStart;
+        Point caretPoint;
+        try { caretPoint = messageInput.GetPositionFromCharIndex(caret); }
+        catch { caretPoint = Point.Empty; }
+        Point anchor = messageInput.PointToScreen(new Point(caretPoint.X, caretPoint.Y + messageInput.Font.Height + 4));
+        Point local = PointToClient(anchor);
+        int itemHeight = mentionList.ItemHeight;
+        int height = Math.Max(itemHeight + 4, Math.Min(6, mentionList.Items.Count) * itemHeight + 4);
+        int width = Math.Max(180, Math.Min(320, messageInput.Width / 2));
+        int x = Math.Min(Math.Max(8, local.X), Math.Max(8, ClientSize.Width - width - 8));
+        int y = local.Y;
+        if (y + height > ClientSize.Height - 8) y = Math.Max(8, local.Y - height - messageInput.Font.Height - 8);
+        mentionList.SetBounds(x, y, width, height);
+    }
+
+    private bool HandleMentionKey(KeyEventArgs e)
+    {
+        if (mentionList == null || !mentionList.Visible) return false;
+        if (e.KeyCode == Keys.Down || e.KeyCode == Keys.Up)
+        {
+            if (mentionList.Items.Count > 0)
+            {
+                int index = mentionList.SelectedIndex + (e.KeyCode == Keys.Down ? 1 : -1);
+                if (index < 0) index = mentionList.Items.Count - 1;
+                if (index >= mentionList.Items.Count) index = 0;
+                mentionList.SelectedIndex = index;
+            }
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return true;
+        }
+        if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Tab)
+        {
+            InsertMention();
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return true;
+        }
+        if (e.KeyCode == Keys.Escape)
+        {
+            HideMentionMenu();
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return true;
+        }
+        return false;
+    }
+
+    private List<AgentData> FilterAgents(List<AgentData> source)
+    {
+        string filter = memberFilter == null ? "" : memberFilter.Text.Trim();
+        if (filter.Length == 0) return source;
+        var result = new List<AgentData>();
+        foreach (AgentData agent in source)
+        {
+            if (agent.Name.IndexOf(filter, StringComparison.CurrentCultureIgnoreCase) >= 0 ||
+                agent.Model.IndexOf(filter, StringComparison.CurrentCultureIgnoreCase) >= 0 ||
+                StatusName(agent.Status).IndexOf(filter, StringComparison.CurrentCultureIgnoreCase) >= 0 ||
+                agent.Status.IndexOf(filter, StringComparison.CurrentCultureIgnoreCase) >= 0)
+                result.Add(agent);
+        }
+        return result;
+    }
+
+    private void ApplyMemberFilter()
+    {
+        if (currentVisibleAgents == null || memberList == null) return;
+        memberScrollOffset = 0;
+        ReconcileMembers(FilterAgents(currentVisibleAgents));
+    }
+
+    private void InsertMentionName(string name)
+    {
+        if (String.IsNullOrWhiteSpace(name) || messageInput == null || messageInput.ReadOnly || !connected) return;
+        int caret = messageInput.SelectionStart;
+        string text = messageInput.Text;
+        string prefix = caret > 0 && !Char.IsWhiteSpace(text[caret - 1]) ? " " : "";
+        string insert = prefix + "@" + name + " ";
+        mentionInserting = true;
+        try
+        {
+            messageInput.Text = text.Substring(0, caret) + insert + text.Substring(caret);
+            messageInput.SelectionStart = caret + insert.Length;
+        }
+        finally { mentionInserting = false; }
+        HideMentionMenu();
+        messageInput.Focus();
+    }
+
+    private void InsertMention()
+    {
+        if (mentionList == null || !mentionList.Visible || mentionList.SelectedItem == null) return;
+        string name = Convert.ToString(mentionList.SelectedItem, CultureInfo.InvariantCulture);
+        int caret = messageInput.SelectionStart;
+        string text = messageInput.Text;
+        if (mentionStart < 0 || mentionStart > caret || caret > text.Length)
+        {
+            HideMentionMenu();
+            return;
+        }
+        string insert = "@" + name + " ";
+        mentionInserting = true;
+        try
+        {
+            messageInput.Text = text.Substring(0, mentionStart) + insert + text.Substring(caret);
+            messageInput.SelectionStart = mentionStart + insert.Length;
+        }
+        finally { mentionInserting = false; }
+        HideMentionMenu();
+        messageInput.Focus();
     }
 
     private void SaveConnectionDocument()
@@ -1176,6 +2304,56 @@ internal sealed class ChatForm : Form
         }
     }
 
+    private ReplyTarget ReplyTargetFor(long conversationId)
+    {
+        ReplyTarget target;
+        return replyTargets.TryGetValue(conversationId, out target) ? target : null;
+    }
+
+    private void SetReplyTarget(long messageId, string name, string text)
+    {
+        if (activeConversationId <= 0) return;
+        var target = new ReplyTarget { Id = messageId, Name = name, Text = Snippet(text, 60) };
+        replyTargets[activeConversationId] = target;
+        UpdateReplyBar();
+        messageInput.Focus();
+    }
+
+    private void ClearReplyTarget()
+    {
+        if (activeConversationId > 0) replyTargets.Remove(activeConversationId);
+        UpdateReplyBar();
+    }
+
+    private void UpdateReplyBar()
+    {
+        if (replyBar == null) return;
+        ReplyTarget target = activeConversationId > 0 ? ReplyTargetFor(activeConversationId) : null;
+        replyBar.Visible = target != null;
+        if (target != null)
+        {
+            replyLabel.Text = "回复 " + target.Name + " · #" + target.Id.ToString(CultureInfo.InvariantCulture) + "：" + target.Text;
+            replyLabel.AccessibleName = replyLabel.Text;
+        }
+    }
+
+    private static string Snippet(string text, int limit)
+    {
+        string value = (text ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+        return value.Length > limit ? value.Substring(0, limit) + "…" : value;
+    }
+
+    private void ClearSentReply(long conversationId, ReplyTarget sent)
+    {
+        if (sent == null) return;
+        ReplyTarget current;
+        if (replyTargets.TryGetValue(conversationId, out current) && current.Id == sent.Id)
+        {
+            replyTargets.Remove(conversationId);
+            if (activeConversationId == conversationId) UpdateReplyBar();
+        }
+    }
+
     private async Task SendMessageAsync()
     {
         var target = recipientBox.SelectedItem as Recipient;
@@ -1186,12 +2364,14 @@ internal sealed class ChatForm : Form
         { MessageBox.Show(this, "附件上传结果未确认。请核对后清除该附件草稿，再明确重新选择附件。", "附件上传未确认", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
         if (conversationId <= 0 || target == null || !target.Available || (String.IsNullOrWhiteSpace(messageInput.Text) && (attachments == null || attachments.Count == 0))) return;
         string text = messageInput.Text;
+        ReplyTarget reply = ReplyTargetFor(conversationId);
         if (attachments == null || attachments.Count == 0)
         {
-            await MutateAsync("api/messages", new { text = text, to = target.Id, conversationId = conversationId }, "消息已发送。", delegate(Dictionary<string, object> result)
+            await MutateAsync("api/messages", new { text = text, to = target.Id, conversationId = conversationId, replyTo = reply == null ? (long?)null : reply.Id }, "消息已发送。", delegate(Dictionary<string, object> result)
             {
                 if (activeConversationId == conversationId) { if (messageInput.Text == text) messageInput.Clear(); }
                 else { ConversationDraft draft; if (drafts.TryGetValue(conversationId, out draft) && draft.Text == text) draft.Text = ""; }
+                ClearSentReply(conversationId, reply);
             });
             return;
         }
@@ -1225,10 +2405,11 @@ internal sealed class ChatForm : Form
                 ids.Add(attachment.Id);
             }
             requestInFlight = true;
-            await RequestAsync("api/messages", new { text = text, to = target.Id, conversationId = conversationId, attachmentIds = ids });
+            await RequestAsync("api/messages", new { text = text, to = target.Id, conversationId = conversationId, attachmentIds = ids, replyTo = reply == null ? (long?)null : reply.Id });
             requestInFlight = false;
             applied = true;
             attachmentDrafts.Remove(conversationId);
+            ClearSentReply(conversationId, reply);
             if (activeConversationId == conversationId && messageInput.Text == text) messageInput.Clear();
             errorLabel.Visible = false;
             await LoadStateAsync();
@@ -1253,6 +2434,47 @@ internal sealed class ChatForm : Form
             mutating = false;
             if (!stopping) UpdateButtons();
         }
+    }
+
+    private async Task RefreshAvatarsAsync(Dictionary<string, object> state)
+    {
+        foreach (Dictionary<string, object> row in Rows(state, "agents"))
+        {
+            string id = Value(row, "id"), hash = Value(row, "avatarHash");
+            if (id.Length == 0) continue;
+            if (hash.Length == 0)
+            {
+                avatarSvgByAgent.Remove(id);
+                avatarHashByAgent.Remove(id);
+                continue;
+            }
+            string known;
+            if (avatarHashByAgent.TryGetValue(id, out known) && known == hash) continue;
+            string svg = await RequestTextAsync("api/avatars/" + id);
+            if (String.IsNullOrEmpty(svg)) continue;
+            avatarSvgByAgent[id] = svg;
+            avatarHashByAgent[id] = hash;
+            foreach (MessageRow messageRow in messageRows) messageRow.UpdateAvatar(id, svg);
+            MemberRow member;
+            if (memberRows.TryGetValue(id, out member)) member.SetAvatar(svg);
+        }
+    }
+
+    private async Task<string> RequestTextAsync(string path)
+    {
+        activeRequests++;
+        try
+        {
+            using (var request = new HttpRequestMessage(HttpMethod.Get, path))
+            using (HttpResponseMessage response = await client.SendAsync(request, closing.Token))
+            {
+                string text = await response.Content.ReadAsStringAsync();
+                closing.Token.ThrowIfCancellationRequested();
+                return response.IsSuccessStatusCode ? text : null;
+            }
+        }
+        catch { return null; }
+        finally { activeRequests--; }
     }
 
     private async Task<Dictionary<string, object>> RequestAsync(string path, object body)
@@ -1349,16 +2571,111 @@ internal sealed class ChatForm : Form
         try { File.AppendAllText(Path.Combine(Application.StartupPath, "perf.log"), DateTime.Now.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture) + " " + message + Environment.NewLine); } catch { }
     }
 
+    private void ResetMessageView()
+    {
+        foreach (MessageRow row in messageRows)
+        {
+            messageHistory.Controls.Remove(row);
+            row.Dispose();
+        }
+        messageRows.Clear();
+        cursor = 0;
+        hiddenMessages = 0;
+        browsingHistory = false;
+        messageCount = 0;
+        transcript.Length = 0;
+        pendingOwnMessage = false;
+        messagesPendingLayout = false;
+        messageHistory.AccessibleName = "";
+    }
+
+    private async Task SetPinnedAsync(long messageId, bool pinned)
+    {
+        if (messageId <= 0 || mutating || stopping || !connected) return;
+        await MutateAsync("api/admin/messages/" + messageId.ToString(CultureInfo.InvariantCulture) + "/pin", new { pinned = pinned }, pinned ? "消息已置顶。" : "已取消置顶。", null);
+    }
+
+    private async Task EditMessageAsync(long messageId, string currentText)
+    {
+        if (messageId <= 0 || mutating || stopping || !connected) return;
+        string text = PromptForMessageText("编辑消息 #" + messageId.ToString(CultureInfo.InvariantCulture), currentText);
+        if (text == null) return;
+        if (String.IsNullOrWhiteSpace(text))
+        {
+            MessageBox.Show(this, "消息内容不能为空。", "编辑消息", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        await ApplyMessageEditAsync(messageId, text);
+    }
+
+    private async Task ApplyMessageEditAsync(long messageId, string text)
+    {
+        if (messageId <= 0 || mutating || stopping || !connected) return;
+        await MutateAsync("api/admin/messages/" + messageId.ToString(CultureInfo.InvariantCulture) + "/edit", new { text = text }, "消息已编辑。", null);
+    }
+
+    private string PromptForMessageText(string caption, string initial)
+    {
+        using (var dialog = new Form
+        {
+            Text = caption,
+            FormBorderStyle = FormBorderStyle.Sizable,
+            StartPosition = FormStartPosition.CenterParent,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowInTaskbar = false,
+            Font = Font,
+            ClientSize = new Size(620, 420),
+            MinimumSize = new Size(480, 300),
+            Padding = new Padding(16),
+        })
+        {
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty };
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            var input = new TextBox { Text = initial ?? "", Multiline = true, ScrollBars = ScrollBars.Vertical, MaxLength = 8000, Dock = DockStyle.Fill, AcceptsReturn = true };
+            var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Margin = Padding.Empty };
+            var save = new Button { Text = "保存", DialogResult = DialogResult.OK, AutoSize = true, MinimumSize = new Size(76, 30) };
+            var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(76, 30) };
+            buttons.Controls.Add(save);
+            buttons.Controls.Add(cancel);
+            layout.Controls.Add(input, 0, 0);
+            layout.Controls.Add(buttons, 0, 1);
+            dialog.Controls.Add(layout);
+            dialog.AcceptButton = save;
+            dialog.CancelButton = cancel;
+            input.SelectAll();
+            input.Focus();
+            return dialog.ShowDialog(this) == DialogResult.OK ? input.Text : null;
+        }
+    }
+
+    private async Task DeleteMessageAsync(long messageId)
+    {
+        if (mutating || stopping || !connected || messageId <= 0) return;
+        if (MessageBox.Show(this, "删除消息 #" + messageId.ToString(CultureInfo.InvariantCulture) + "？\r\n附件会一并删除，且不可恢复。", "删除消息", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        await MutateAsync("api/admin/messages/" + messageId.ToString(CultureInfo.InvariantCulture) + "/delete", new { }, "消息已删除。", null);
+    }
+
 private async Task LoadStateAsync()
     {
         var perf = Stopwatch.StartNew();
-        Dictionary<string, object> state = await RequestAsync("api/admin/state", null);
+        // After the first load the window only needs a change hint, not the 200-message payload.
+        bool lightweight = cursor > 0;
+        Dictionary<string, object> state = await RequestAsync(lightweight ? "api/admin/state?includeMessages=0" : "api/admin/state", null);
         PerfLog("phase state=" + perf.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture));
         RenderState(state);
+        long revision = state.ContainsKey("messageRevision") ? Number(state, "messageRevision") : 0;
+        bool revisionReload = lastMessageRevision >= 0 && revision != lastMessageRevision;
+        if (revisionReload) ResetMessageView();
+        lastMessageRevision = revision;
+        await RefreshAvatarsAsync(state);
         await RefreshLeaderboardAsync(false);
         PerfLog("phase render=" + perf.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture));
         long conversationId = activeConversationId;
-        long snapshotLastId = cursor;
+        long latestMessageId = state.ContainsKey("latestMessageId") ? Number(state, "latestMessageId") : Int64.MaxValue;
+        if (revisionReload && latestMessageId > 0 && latestMessageId != Int64.MaxValue) cursor = Math.Max(0L, latestMessageId - 200);
+        long snapshotLastId = revisionReload && latestMessageId != Int64.MaxValue ? Math.Max(cursor, latestMessageId) : cursor;
         var stateMessages = new List<Dictionary<string, object>>();
         foreach (Dictionary<string, object> item in Rows(state, "messages"))
         {
@@ -1377,24 +2694,41 @@ private async Task LoadStateAsync()
             hiddenMessages += tailStart;
             PerfLog("phase append=" + perf.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture));
         }
-        // State contains only the latest 200 messages; traverse this conversation's independent cursor stream.
-        do
+        // External conversation switch uses a lightweight state without messages: start from the newest page
+        // instead of replaying history from the oldest message.
+        if (!revisionReload && cursor == 0 && stateMessages.Count == 0 && latestMessageId > 0 && latestMessageId != Int64.MaxValue)
         {
-            Dictionary<string, object> page = await RequestAsync("api/messages?conversationId=" + conversationId.ToString(CultureInfo.InvariantCulture) + "&after=" + cursor.ToString(CultureInfo.InvariantCulture) + "&limit=200", null);
-            if (activeConversationId != conversationId || Number(page, "conversationId") != conversationId)
-                throw new ChatClientException("对话已变化，正在等待重新同步。");
-            foreach (Dictionary<string, object> row in Rows(page, "messages"))
-                if (Number(row, "conversationId") != conversationId) throw new ChatClientException("消息所属对话不一致，已停止载入。");
-            long previousCursor = cursor;
-            long next = Number(page, "cursor");
-            int added = browsingHistory ? 0 : AppendMessages(Rows(page, "messages"));
-            if (next < cursor || (added > 0 && next <= cursor)) throw new ChatClientException("消息游标未推进，已保留现有历史。");
-            cursor = next;
-            if (next <= previousCursor || cursor >= snapshotLastId || (!browsingHistory && added == 0)) break;
-            SetStatus("正在载入完整历史 · " + messageCount + " 条", false);
-            await Task.Yield();
-            closing.Token.ThrowIfCancellationRequested();
-        } while (true);
+            cursor = Math.Max(0L, latestMessageId - 200);
+            snapshotLastId = Math.Max(cursor, latestMessageId);
+        }
+        // State contains only the latest 200 messages; traverse this conversation's independent cursor stream.
+        // latestMessageId skips the round trip entirely while the conversation is idle.
+        latestMessageId = Math.Max(latestMessageId, snapshotLastId);
+        if (revisionReload) suppressAttention = true;
+        try
+        {
+        if (latestMessageId > cursor)
+        {
+            do
+            {
+                Dictionary<string, object> page = await RequestAsync("api/messages?conversationId=" + conversationId.ToString(CultureInfo.InvariantCulture) + "&after=" + cursor.ToString(CultureInfo.InvariantCulture) + "&limit=200", null);
+                if (activeConversationId != conversationId || Number(page, "conversationId") != conversationId)
+                    throw new ChatClientException("对话已变化，正在等待重新同步。");
+                foreach (Dictionary<string, object> row in Rows(page, "messages"))
+                    if (Number(row, "conversationId") != conversationId) throw new ChatClientException("消息所属对话不一致，已停止载入。");
+                long previousCursor = cursor;
+                long next = Number(page, "cursor");
+                int added = browsingHistory ? 0 : AppendMessages(Rows(page, "messages"));
+                if (next < cursor || (added > 0 && next <= cursor)) throw new ChatClientException("消息游标未推进，已保留现有历史。");
+                cursor = next;
+                if (next <= previousCursor || cursor >= snapshotLastId || (!browsingHistory && added == 0)) break;
+                SetStatus("正在载入完整历史 · " + messageCount + " 条", false);
+                await Task.Yield();
+                closing.Token.ThrowIfCancellationRequested();
+            } while (true);
+        }
+        }
+        finally { if (revisionReload) suppressAttention = false; }
         if (messagesPendingLayout)
         {
             bool followAll = messageHistory.AtBottom || pendingOwnMessage;
@@ -1419,11 +2753,35 @@ private async Task LoadStateAsync()
             long selectedId = Number(state, "activeConversationId");
             string title = null;
             var conversationRows = new List<string[]>();
+            var retainedConversations = new HashSet<long>();
             foreach (Dictionary<string, object> row in Rows(state, "conversations"))
             {
-                conversationRows.Add(new string[] { Value(row, "id"), Value(row, "title"), "" });
-                if (Number(row, "id") == selectedId) title = Value(row, "title");
+                long conversationId = Number(row, "id");
+                long latestMessageId = Number(row, "latestMessageId");
+                retainedConversations.Add(conversationId);
+                conversationLatest[conversationId] = latestMessageId;
+                long seen;
+                if (!conversationBaselineDone)
+                {
+                    conversationSeen[conversationId] = latestMessageId;
+                }
+                else if (conversationId == selectedId)
+                {
+                    conversationSeen[conversationId] = latestMessageId;
+                    conversationUnread.Remove(conversationId);
+                }
+                else
+                {
+                    if (!conversationSeen.TryGetValue(conversationId, out seen)) seen = 0;
+                    if (latestMessageId > seen) conversationUnread.Add(conversationId);
+                    else conversationUnread.Remove(conversationId);
+                }
+                conversationRows.Add(new string[] { Value(row, "id"), (conversationUnread.Contains(conversationId) ? "● " : "") + Value(row, "title"), "" });
+                if (conversationId == selectedId) title = Value(row, "title");
             }
+            conversationBaselineDone = true;
+            foreach (long stale in new List<long>(conversationSeen.Keys))
+                if (!retainedConversations.Contains(stale)) { conversationSeen.Remove(stale); conversationUnread.Remove(stale); conversationLatest.Remove(stale); }
             if (title == null) throw new ChatClientException("当前对话不在历史列表中，请等待重新同步。");
             conversationCount = conversationRows.Count;
             hoverConversationIndex = -1;
@@ -1437,17 +2795,34 @@ private async Task LoadStateAsync()
             registrationButton.Text = registrationOpen ? "关闭新成员登记" : "开启新成员登记";
             registrationButton.AccessibleName = registrationButton.Text;
             agents.Clear();
-            int active = 0, pending = 0, mutedCount = 0;
+            int active = 0, pending = 0, mutedCount = 0, thinkingCount = 0, generatingCount = 0;
             var visibleAgents = new List<AgentData>();
             foreach (Dictionary<string, object> row in Rows(state, "agents"))
             {
-                var agent = new AgentData { Id = Value(row, "id"), Name = Value(row, "name"), Status = Value(row, "status"), Model = Value(row, "model") };
+                object activityObject;
+                Dictionary<string, object> activity = row.TryGetValue("activity", out activityObject) ? activityObject as Dictionary<string, object> : null;
+                object onlineObject;
+                bool online = row.TryGetValue("online", out onlineObject) && onlineObject != null && Convert.ToBoolean(onlineObject, CultureInfo.InvariantCulture);
+                var agent = new AgentData
+                {
+                    Id = Value(row, "id"),
+                    Name = Value(row, "name"),
+                    Status = Value(row, "status"),
+                    Model = Value(row, "model"),
+                    Activity = activity == null ? "" : Value(activity, "state"),
+                    ActivityDetail = activity == null ? "" : Value(activity, "detail"),
+                    Online = online,
+                    AvatarHash = Value(row, "avatarHash"),
+                    AvatarSvg = avatarSvgByAgent.ContainsKey(Value(row, "id")) ? avatarSvgByAgent[Value(row, "id")] : "",
+                };
                 agents.Add(agent.Id, agent);
                 // Revoked identities stay resolvable for history and audit, but leave the member list.
                 if (agent.Status == "revoked") continue;
                 if (agent.Status == "active") active++;
                 if (agent.Status == "pending") pending++;
                 if (agent.Status == "paused") mutedCount++;
+                if (agent.Activity == "thinking") thinkingCount++;
+                if (agent.Activity == "generating") generatingCount++;
                 visibleAgents.Add(agent);
             }
             visibleAgents.Sort(delegate(AgentData left, AgentData right)
@@ -1455,11 +2830,31 @@ private async Task LoadStateAsync()
                 int rank = MemberRank(left.Status).CompareTo(MemberRank(right.Status));
                 return rank != 0 ? rank : StringComparer.CurrentCultureIgnoreCase.Compare(left.Name, right.Name);
             });
-            ReconcileMembers(visibleAgents);
-            memberHeading.Text = "群成员 · " + visibleAgents.Count;
-            memberHeading.AccessibleName = memberHeading.Text;
-            memberSummary.Text = visibleAgents.Count == 0 ? "暂无成员 · 开启登记后等待申请" : "已批准 " + active + " · 待审批 " + pending + " · 已禁言 " + mutedCount;
-            groupSubtitle.Text = active + " 位可协作成员" + (mutedCount > 0 ? " · " + mutedCount + " 人禁言" : "") + "  /  " + (registrationOpen ? "登记开放" : "登记关闭") + "  /  管理员视图";
+            currentVisibleAgents = visibleAgents;
+            ReconcileMembers(FilterAgents(visibleAgents));
+            string heading = "群成员 · " + visibleAgents.Count;
+            if (memberHeading.Text != heading)
+            {
+                memberHeading.Text = heading;
+                memberHeading.AccessibleName = heading;
+            }
+            string summary = visibleAgents.Count == 0 ? "暂无成员 · 开启登记后等待申请" : "已批准 " + active + " · 待审批 " + pending + " · 已禁言 " + mutedCount;
+            if (memberSummary.Text != summary) memberSummary.Text = summary;
+            string subtitle = active + " 位可协作成员" + (mutedCount > 0 ? " · " + mutedCount + " 人禁言" : "") + (thinkingCount > 0 ? " · " + thinkingCount + " 人思考中" : "") + (generatingCount > 0 ? " · " + generatingCount + " 人生成中" : "") + "  /  " + (registrationOpen ? "登记开放" : "登记关闭") + "  /  管理员视图";
+            if (groupSubtitle.Text != subtitle) groupSubtitle.Text = subtitle;
+            object pinnedObject;
+            Dictionary<string, object> pinned = state.TryGetValue("pinnedMessage", out pinnedObject) ? pinnedObject as Dictionary<string, object> : null;
+            pinnedMessageId = pinned == null ? 0 : Number(state, "pinnedMessageId");
+            if (pinnedBar != null)
+            {
+                pinnedBar.Visible = pinned != null && pinnedMessageId > 0;
+                if (pinned != null && pinnedMessageId > 0)
+                {
+                    string pinText = Snippet(Value(pinned, "text"), 80);
+                    pinnedLabel.Text = "置顶 · " + DisplayName(Value(pinned, "from")) + "：" + pinText;
+                    pinnedLabel.AccessibleName = pinnedLabel.Text;
+                }
+            }
             RenderRecipients();
             if (auditDialog != null && !auditDialog.IsDisposed && auditList != null && auditEmpty != null)
             {
@@ -1467,9 +2862,10 @@ private async Task LoadStateAsync()
             foreach (Dictionary<string, object> row in Rows(state, "audit"))
                 auditRows.Add(new string[] { Value(row, "id"), DateText(Value(row, "createdAt")), DisplayName(Value(row, "actor")), AuditActionText(Value(row, "action")), Value(row, "target") == "registration" ? "成员登记" : DisplayName(Value(row, "target")) });
             auditRows.Reverse();
-            ReconcileList(auditList, auditRows);
-            auditEmpty.Text = auditRows.Count == 0 ? "暂无操作记录。" : "最近 " + auditRows.Count + " 条审计记录（服务最多提供最近 200 条）";
+            auditRowsAll = auditRows;
+            ApplyAuditFilter();
             }
+            UpdateReplyBar();
         }
         finally { rendering = false; }
     }
@@ -1661,10 +3057,12 @@ private async Task LoadStateAsync()
                 {
                     row = new MemberRow(agent.Id);
                     row.Perform = delegate(string status) { var ignored = ChangeAgentAsync(row.AgentId, status); };
+                    row.MentionRequested = delegate(string name) { InsertMentionName(name); };
+                    row.TimelineRequested = delegate(string agentId) { ShowSearchDialog(agentId); };
                     memberRows.Add(agent.Id, row);
                     memberList.Controls.Add(row);
                 }
-                row.UpdateMember(agent.Name, agent.Status, agent.Model, connected && !mutating && !stopping);
+                row.UpdateMember(agent.Name, agent.Status, agent.Model, agent.Online, agent.Activity, agent.ActivityDetail, connected && !mutating && !stopping, agent.AvatarHash, agent.AvatarSvg);
             }
             var removed = new List<string>();
             foreach (string id in memberRows.Keys)
@@ -1679,6 +3077,9 @@ private async Task LoadStateAsync()
         }
         finally { memberList.ResumeLayout(true); }
         memberEmpty.Visible = visible.Count == 0;
+        memberEmpty.Text = visible.Count == 0
+            ? (memberFilter != null && memberFilter.Text.Trim().Length > 0 ? "没有匹配的成员" : "暂无成员\r\n开启登记后，等待智能体申请")
+            : "";
         LayoutMemberRows();
     }
 
@@ -1924,6 +3325,7 @@ private async Task LoadStateAsync()
             messageRows.Clear();
             long savedCursor = cursor;
             int savedCount = messageCount, transcriptLength = transcript.Length;
+            suppressAttention = true;
             cursor = 0;
             try { AppendMessages(rows); }
             finally { cursor = savedCursor; messageCount = savedCount; transcript.Length = transcriptLength; messageHistory.AccessibleName = transcript.ToString(); pendingOwnMessage = false; messagesPendingLayout = false; }
@@ -1939,6 +3341,7 @@ private async Task LoadStateAsync()
         {
             if (entered) requestGate.Release();
             loadingHistory = false;
+            suppressAttention = false;
             if (olderHistoryButton != null) olderHistoryButton.Enabled = true;
             if (newerHistoryButton != null) newerHistoryButton.Enabled = true;
         }
@@ -1970,8 +3373,15 @@ private async Task LoadStateAsync()
                     foreach (object mentioned in mentions) if (mentioned != null) mentionedNames.Add(DisplayName(Convert.ToString(mentioned, CultureInfo.InvariantCulture)));
                     if (mentionedNames.Count > 0) route += " · @ " + String.Join("、", mentionedNames.ToArray());
                 }
+                if (!String.IsNullOrEmpty(Value(data, "editedAt"))) route += " · 已编辑";
                 string time = DateText(Value(data, "createdAt"));
-                var row = new MessageRow(id, name, route, time, text, from == "admin", directed, replyTo > 0, Font);
+                string avatarSvg;
+                avatarSvgByAgent.TryGetValue(from, out avatarSvg);
+                var row = new MessageRow(id, name, route, time, text, from == "admin", directed, replyTo > 0, Font, from, avatarSvg);
+                row.ReplyRequested = delegate(MessageRow source) { SetReplyTarget(source.Id, source.SenderName, source.MessageText); };
+                row.DeleteRequested = delegate(MessageRow source) { var ignored = DeleteMessageAsync(source.Id); };
+                row.EditRequested = delegate(MessageRow source) { var ignored = EditMessageAsync(source.Id, source.MessageText); };
+                row.PinRequested = delegate(MessageRow source) { var ignored = SetPinnedAsync(source.Id, true); };
                 foreach (Dictionary<string, object> attachment in Rows(data, "attachments"))
                 {
                     string attachmentId = Value(attachment, "id"), attachmentName = Value(attachment, "name"), contentType = Value(attachment, "contentType");
@@ -2002,6 +3412,7 @@ private async Task LoadStateAsync()
             }
         }
         finally { messageHistory.ResumeLayout(false); messageHistory.Invalidate(); }
+        if (added > 0 && connected && !browsingHistory && !suppressAttention) NoteNewMessages(added);
         return added;
     }
 
@@ -2023,13 +3434,17 @@ private async Task LoadStateAsync()
         if (messageHistory == null || stopping) return;
         if (layingOutMessages) { layoutQueued = true; return; }
         layingOutMessages = true;
+        var layoutTimer = Stopwatch.StartNew();
+        long resetMs = 0, measureMs = 0, positionMs = 0;
         int oldScroll = -messageHistory.AutoScrollPosition.Y;
         int width = Math.Max(260, messageHistory.ClientSize.Width - 2);
+        float scale = DeviceDpi / 96f;
         int y = 12;
         messageHistory.SuspendLayout();
         try
         {
             messageHistory.AutoScrollPosition = Point.Empty;
+            resetMs = layoutTimer.ElapsedMilliseconds;
             while (messageRows.Count > 30)
             {
                 MessageRow dropped = messageRows[0];
@@ -2040,8 +3455,9 @@ private async Task LoadStateAsync()
             }
             foreach (MessageRow row in messageRows)
             {
-                try { row.SetRowWidth(width); } catch { }
+                try { row.SetRowWidth(width, scale); } catch { }
             }
+            measureMs = layoutTimer.ElapsedMilliseconds;
             // Win32 child coordinates are 16-bit: rows below y=32767 collapse onto the same
             // line. Keep the rendered window under 30000px and drop the oldest rows first.
             long total = 0;
@@ -2082,6 +3498,7 @@ private async Task LoadStateAsync()
                 y += rowHeight;
             }
             messageHistory.AutoScrollMinSize = new Size(0, y + 14);
+            positionMs = layoutTimer.ElapsedMilliseconds;
         }
         finally
         {
@@ -2092,6 +3509,7 @@ private async Task LoadStateAsync()
         // Scroll only after WinForms has recomputed the display rectangle and scrollbar range.
         messageHistory.AutoScrollPosition = new Point(0, follow ? Int32.MaxValue : oldScroll);
         messageHistory.Invalidate(true);
+        PerfLog(string.Format(CultureInfo.InvariantCulture, "layout rows={0} w={1} reset={2} measure={3} position={4} scroll={5}", messageRows.Count, width, resetMs, measureMs, positionMs, layoutTimer.ElapsedMilliseconds));
         SafeBeginInvoke(delegate
         {
             if (!stopping) { messageHistory.Invalidate(true); messageHistory.Refresh(); }
@@ -2180,17 +3598,25 @@ private async Task LoadStateAsync()
             case "conversation.create": return "新建对话";
             case "conversation.activate": return "切换对话";
             case "conversation.delete": return "删除对话";
+            case "conversation.rename": return "重命名对话";
             case "registration.open": return "开启成员登记";
             case "registration.close": return "关闭成员登记";
             case "agent.join": return "申请加入";
             case "agent.active": return "批准或解禁";
             case "agent.paused": return "禁言成员";
             case "agent.revoked": return "撤销成员";
+            case "agent.avatar": return "更新头像";
+            case "message.delete": return "删除消息";
+            case "message.edit": return "编辑消息";
+            case "message.pin": return "置顶消息";
+            case "message.unpin": return "取消置顶";
             case "task.create": return "创建任务";
             case "task.claim": return "认领任务";
             case "task.release": return "释放任务";
             case "task.complete": return "完成任务";
             case "task.reopen": return "重新打开任务";
+            case "task.assign": return "指派任务";
+            case "task.delete": return "删除任务";
             default: return "其他操作";
         }
     }
@@ -2326,8 +3752,9 @@ private async Task LoadStateAsync()
         base.Dispose(disposing);
     }
 
-    private sealed class AgentData { public string Id, Name, Status, Model; }
+    private sealed class AgentData { public string Id, Name, Status, Model, Activity, ActivityDetail, AvatarHash, AvatarSvg; public bool Online; }
     private sealed class ConversationDraft { public string Text, RecipientId; }
+    private sealed class ReplyTarget { public long Id; public string Name, Text; }
     private sealed class Recipient
     {
         public readonly string Id, Label;
@@ -2341,8 +3768,12 @@ private async Task LoadStateAsync()
     {
         public readonly string AgentId;
         public Action<string> Perform;
+        public Action<string> MentionRequested;
+        public Action<string> TimelineRequested;
+        private readonly AvatarBadge memberAvatar;
         private readonly Label memberName;
         private readonly Label modelName;
+        private readonly Label activityLabel;
         private readonly PillLabel badge;
         private readonly FlowLayoutPanel actions;
         private string status;
@@ -2356,22 +3787,72 @@ private async Task LoadStateAsync()
             Height = Dpi(84);
             memberName = new Label { AutoEllipsis = true, UseMnemonic = false, BackColor = Color.White, ForeColor = Color.FromArgb(27, 43, 62), Font = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft };
             modelName = new Label { AutoEllipsis = true, UseMnemonic = false, BackColor = Color.White, ForeColor = Color.FromArgb(118, 133, 148), Font = new Font("Microsoft YaHei UI", 8F), TextAlign = ContentAlignment.MiddleLeft };
+            activityLabel = new Label { AutoEllipsis = true, UseMnemonic = false, BackColor = Color.White, ForeColor = Color.FromArgb(118, 133, 148), Font = new Font("Microsoft YaHei UI", 8F), TextAlign = ContentAlignment.MiddleRight, Visible = false, AccessibleName = "当前状态" };
+            memberAvatar = new AvatarBadge { Font = new Font("Microsoft YaHei UI", 8F, FontStyle.Bold) };
             badge = new PillLabel();
             actions = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, BackColor = Color.White, Margin = Padding.Empty, Padding = Padding.Empty };
+            EventHandler mention = delegate { Action<string> handler = MentionRequested; if (handler != null) handler(memberName.Text); };
+            DoubleClick += mention;
+            memberName.DoubleClick += mention;
+            modelName.DoubleClick += mention;
+            memberAvatar.DoubleClick += mention;
+            var memberMenu = new ContextMenuStrip();
+            memberMenu.Items.Add("查看该成员发言", null, delegate { Action<string> handler = TimelineRequested; if (handler != null) handler(AgentId); });
+            memberMenu.Items.Add("插入 @提及", null, delegate { Action<string> handler = MentionRequested; if (handler != null) handler(memberName.Text); });
+            ContextMenuStrip = memberMenu;
+            memberName.ContextMenuStrip = memberMenu;
+            modelName.ContextMenuStrip = memberMenu;
+            memberAvatar.ContextMenuStrip = memberMenu;
+            Controls.Add(memberAvatar);
             Controls.Add(memberName);
             Controls.Add(modelName);
+            Controls.Add(activityLabel);
             Controls.Add(badge);
             Controls.Add(actions);
             if (HighContrast) ApplySystemPalette(this);
         }
 
-        public void UpdateMember(string name, string agentStatus, string model, bool enabled)
+        private string lastSignature;
+
+        public void SetAvatar(string svg)
         {
+            memberAvatar.SetAvatar(SvgAvatar.Get(svg, Dpi(24)));
+        }
+
+        public void UpdateMember(string name, string agentStatus, string model, bool online, string activity, string detail, bool enabled, string avatarHash, string avatarSvg)
+        {
+            string signature = name + "\u0001" + agentStatus + "\u0001" + model + "\u0001" + (online ? "1" : "0") + activity + "\u0001" + detail + "\u0001" + (enabled ? "1" : "0") + "\u0001" + avatarHash;
+            // Polling runs every 2 seconds; unchanged rows must not re-measure or re-layout.
+            if (signature == lastSignature) return;
+            lastSignature = signature;
+            memberAvatar.Text = String.IsNullOrWhiteSpace(name) ? "?" : StringInfo.GetNextTextElement(name);
+            memberAvatar.FillColor = AvatarColor(name);
+            memberAvatar.SetAvatar(SvgAvatar.Get(avatarSvg, Dpi(24)));
             memberName.Text = name;
             memberName.AccessibleName = name;
             modelName.Text = "模型 · " + (String.IsNullOrWhiteSpace(model) ? "未声明" : model);
             modelName.AccessibleName = modelName.Text;
-            AccessibleName = name + " · " + StatusText(agentStatus) + " · " + modelName.Text;
+            string activityText = "";
+            Color activityColor = Color.FromArgb(118, 133, 148);
+            if (agentStatus == "active" || agentStatus == "paused")
+            {
+                switch (activity)
+                {
+                    case "thinking": activityText = "思考中…"; activityColor = Color.FromArgb(180, 83, 9); break;
+                    case "generating": activityText = "生成中…"; activityColor = Color.FromArgb(15, 118, 110); break;
+                    case "idle": activityText = "空闲"; break;
+                    default:
+                        activityText = online ? "空闲" : "离线";
+                        activityColor = online ? Color.FromArgb(107, 119, 126) : Color.FromArgb(154, 164, 174);
+                        break;
+                }
+                if ((activity == "thinking" || activity == "generating") && !String.IsNullOrWhiteSpace(detail)) activityText += " · " + detail.Trim();
+            }
+            activityLabel.Text = activityText;
+            activityLabel.Visible = activityText.Length > 0;
+            activityLabel.AccessibleName = "当前状态：" + (activityText.Length == 0 ? "未上报" : activityText);
+            if (!HighContrast) activityLabel.ForeColor = activityColor;
+            AccessibleName = name + " · " + StatusText(agentStatus) + " · " + (activityText.Length == 0 ? "无活动状态" : activityText) + " · " + modelName.Text;
             badge.SetStatus(agentStatus);
             if (status != agentStatus)
             {
@@ -2438,12 +3919,17 @@ private async Task LoadStateAsync()
         protected override void OnLayout(LayoutEventArgs e)
         {
             base.OnLayout(e);
-            if (actions == null || memberName == null || badge == null || modelName == null) return;
+            if (actions == null || memberName == null || badge == null || modelName == null || activityLabel == null) return;
             int pad = Dpi(12);
             Size actionSize = actions.GetPreferredSize(Size.Empty);
             int actionWidth = Math.Min(actionSize.Width, Math.Max(0, Width - Dpi(88)));
             actions.SetBounds(Width - pad - actionWidth, Dpi(28), actionWidth, actionSize.Height);
-            memberName.SetBounds(pad, Dpi(6), Math.Max(Dpi(40), Width - pad * 2), Dpi(22));
+            int activityWidth = 0;
+            if (activityLabel.Visible && !String.IsNullOrEmpty(activityLabel.Text))
+                activityWidth = Math.Min(Math.Max(Dpi(40), Width / 2), TextRenderer.MeasureText(activityLabel.Text, activityLabel.Font, Size.Empty, TextFormatFlags.NoPadding).Width + Dpi(4));
+            activityLabel.SetBounds(Width - pad - activityWidth, Dpi(7), activityWidth, Dpi(18));
+            memberAvatar.SetBounds(pad, Dpi(6), Dpi(24), Dpi(24));
+            memberName.SetBounds(pad + Dpi(30), Dpi(6), Math.Max(Dpi(40), Width - pad * 2 - Dpi(30) - (activityWidth > 0 ? activityWidth + Dpi(8) : 0)), Dpi(22));
             badge.SetBounds(pad, Dpi(31), badge.Width, badge.Height);
             modelName.SetBounds(pad, Dpi(60), Math.Max(Dpi(40), Width - pad * 2), Dpi(18));
         }
@@ -2889,18 +4375,35 @@ private async Task LoadStateAsync()
     private sealed class AvatarBadge : Label
     {
         public Color FillColor = Color.Gray;
+        private Bitmap avatarImage;
         public AvatarBadge()
         {
             SetStyle(ControlStyles.SupportsTransparentBackColor | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint, true);
             BackColor = Color.Transparent;
             ForeColor = Color.White;
         }
+        public void SetAvatar(Bitmap image)
+        {
+            if (ReferenceEquals(avatarImage, image)) return;
+            avatarImage = image;
+            Invalidate();
+        }
         protected override void OnPaint(PaintEventArgs e)
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             using (GraphicsPath path = RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), Math.Max(2, Math.Min(Width, Height))))
-            using (var brush = new SolidBrush(HighContrast ? SystemColors.Highlight : FillColor))
-                e.Graphics.FillPath(brush, path);
+            {
+                if (avatarImage != null)
+                {
+                    e.Graphics.SetClip(path);
+                    e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    e.Graphics.DrawImage(avatarImage, new Rectangle(0, 0, Width, Height));
+                    e.Graphics.ResetClip();
+                    return;
+                }
+                using (var brush = new SolidBrush(HighContrast ? SystemColors.Highlight : FillColor))
+                    e.Graphics.FillPath(brush, path);
+            }
             TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, HighContrast ? SystemColors.HighlightText : ForeColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
         }
     }
@@ -3185,20 +4688,57 @@ private async Task LoadStateAsync()
         }
     }
 
+    private static Color AvatarColor(string name)
+    {
+        int hash = 0;
+        foreach (char letter in name) hash = unchecked(hash * 31 + letter);
+        Color[] colors = { Color.FromArgb(99, 144, 178), Color.FromArgb(159, 133, 185), Color.FromArgb(185, 143, 96), Color.FromArgb(87, 158, 151), Color.FromArgb(185, 122, 130) };
+        return colors[(hash & Int32.MaxValue) % colors.Length];
+    }
+
     private sealed class MessageRow : Panel
     {
-        private readonly Label timestamp, sender, avatar;
+        private readonly Label timestamp, sender;
+        private readonly AvatarBadge avatar;
         private readonly BubblePanel bubble;
         private readonly TextBox body;
         private readonly List<InlineAttachment> attachments = new List<InlineAttachment>();
         private readonly bool own;
         private readonly Font messageFont;
+        private readonly string agentId;
+        private readonly long messageId;
+        private readonly string senderName;
+        private readonly string messageText;
+        private string avatarSvg;
         private int lastWidth = -1;
 
-        public MessageRow(long id, string name, string route, string time, string text, bool admin, bool directed, bool reply, Font uiFont)
+        public string AgentId { get { return agentId; } }
+        public long Id { get { return messageId; } }
+        public string SenderName { get { return senderName; } }
+        public string MessageText { get { return messageText; } }
+        public Action<MessageRow> ReplyRequested;
+        public Action<MessageRow> DeleteRequested;
+        public Action<MessageRow> EditRequested;
+        public Action<MessageRow> PinRequested;
+
+        public void UpdateAvatar(string id, string svg)
+        {
+            if (id != agentId || svg == avatarSvg) return;
+            avatarSvg = svg;
+            if (lastAvatarSize > 0) avatar.SetAvatar(SvgAvatar.Get(avatarSvg, lastAvatarSize));
+        }
+
+        private int lastAvatarSize;
+
+        public MessageRow(long id, string name, string route, string time, string text, bool admin, bool directed, bool reply, Font uiFont, string agentId, string avatarSvg)
         {
             DoubleBuffered = true;
             own = admin;
+            this.agentId = agentId;
+            this.messageId = id;
+            this.senderName = name;
+            this.messageText = text;
+            this.avatarSvg = avatarSvg;
             Font = uiFont;
             Margin = Padding.Empty;
             Name = "Message_" + id;
@@ -3214,6 +4754,18 @@ private async Task LoadStateAsync()
             body = new TextBox { Name = "MessageText_" + id, AccessibleName = name + " · " + route + " · " + text, Text = text.Replace("\r\n", "\n").Replace("\n", "\r\n"), ReadOnly = true, Multiline = true, BorderStyle = BorderStyle.None, BackColor = bubbleColor, ForeColor = Color.FromArgb(35, 39, 42), Font = messageFont, WordWrap = true, TabStop = true, ScrollBars = ScrollBars.None };
             bubble.Controls.Add(body);
             Controls.AddRange(new Control[] { timestamp, sender, avatar, bubble });
+            var actions = new ContextMenuStrip();
+            actions.Items.Add("回复此消息", null, delegate { Action<MessageRow> handler = ReplyRequested; if (handler != null) handler(this); });
+            actions.Items.Add("复制消息文本", null, delegate { try { Clipboard.SetText(messageText); } catch { } });
+            actions.Items.Add("编辑消息…", null, delegate { Action<MessageRow> handler = EditRequested; if (handler != null) handler(this); });
+            actions.Items.Add("置顶消息", null, delegate { Action<MessageRow> handler = PinRequested; if (handler != null) handler(this); });
+            actions.Items.Add(new ToolStripSeparator());
+            actions.Items.Add("删除消息", null, delegate { Action<MessageRow> handler = DeleteRequested; if (handler != null) handler(this); });
+            ContextMenuStrip = actions;
+            body.ContextMenuStrip = actions;
+            bubble.ContextMenuStrip = actions;
+            sender.ContextMenuStrip = actions;
+            avatar.ContextMenuStrip = actions;
             if (HighContrast) ApplySystemPalette(this);
         }
 
@@ -3225,14 +4777,14 @@ private async Task LoadStateAsync()
             Controls.Add(attachment);
         }
 
-        public void SetRowWidth(int width)
+        public void SetRowWidth(int width, float scale)
         {
             if (lastWidth == width) return;
             lastWidth = width;
             Width = width;
-            float scale;
-            using (Graphics graphics = CreateGraphics()) scale = graphics.DpiX / 96F;
             int avatarSize = (int)(26 * scale), edge = (int)(10 * scale), gap = (int)(6 * scale);
+            lastAvatarSize = avatarSize;
+            avatar.SetAvatar(SvgAvatar.Get(avatarSvg, avatarSize));
             int padV = (int)(8 * scale), padL = (int)(8 * scale), padR = own && !HighContrast ? 0 : (int)(8 * scale);
             int maxBody = Math.Max(110, Math.Min((int)(width * 0.94), width - edge - avatarSize - gap - padL - padR - 6));
             Size measured = TextRenderer.MeasureText(own ? body.Text : body.Text + " ", messageFont, new Size(maxBody, Int32.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix);
@@ -3280,14 +4832,6 @@ private async Task LoadStateAsync()
                 attachmentY += h + gap;
             }
             Height = top + nameHeight + Math.Max(avatarSize, bubbleHeight + attachmentHeight + (hasText && attachments.Count > 0 ? gap : 0)) + (int)(14 * scale);
-        }
-
-        private static Color AvatarColor(string name)
-        {
-            int hash = 0;
-            foreach (char letter in name) hash = unchecked(hash * 31 + letter);
-            Color[] colors = { Color.FromArgb(99, 144, 178), Color.FromArgb(159, 133, 185), Color.FromArgb(185, 143, 96), Color.FromArgb(87, 158, 151), Color.FromArgb(185, 122, 130) };
-            return colors[(hash & Int32.MaxValue) % colors.Length];
         }
 
         protected override void Dispose(bool disposing)

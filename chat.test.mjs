@@ -16,6 +16,7 @@ const tempRoot = resolve(await mkdtemp(join(tempBase, 'run-')));
 await mkdir(tempRoot, { recursive: true });
 const dir = await mkdtemp(join(tempRoot, 'contract-'));
 const secret = () => randomBytes(32).toString('hex');
+const AVATAR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4" fill="#0f766e"/></svg>';
 
 async function stop(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
@@ -42,6 +43,7 @@ async function start(dataDir = dir, port = 0) {
 }
 function client(server, token) {
   return async (path, body, status = body !== undefined && ['/api/join', '/api/messages', '/api/tasks'].includes(path) ? 201 : 200, headers = {}) => {
+    if (path === '/api/join' && body && body.avatarSvg === undefined) body = { ...body, avatarSvg: AVATAR };
     const response = await fetch(server.url + path, { method: body === undefined ? 'GET' : 'POST', headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     const result = await response.json();
     assert.equal(response.status, status, `${path}: ${JSON.stringify(result)}`);
@@ -72,7 +74,8 @@ function bridge(server, name, identity, model = 'test-model') {
     waiting.set(id, { resolve: resolveReply, reject, timer });
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
   });
-  return { child, rpc, call: (name, args = {}) => rpc('tools/call', { name, arguments: args }) };
+  const injectAvatar = (name, args) => name === 'chat_join' && args.avatarSvg === undefined ? { ...args, avatarSvg: AVATAR } : args;
+  return { child, rpc, call: (name, args = {}) => rpc('tools/call', { name, arguments: injectAvatar(name, args) }) };
 }
 
 test('real HTTP and MCP lifecycle: approval, private visibility, ownership, revocation, restart', { timeout: 60000 }, async t => {
@@ -435,6 +438,472 @@ test('heartbeat becomes offline after 45 seconds without waiting', { timeout: 60
   assert.equal(state.online, false);
 });
 
+test('join requires a self-drawn SVG avatar, serves it, and allows updates', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'avatar-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const missing = await fetch(server.url + '/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'No Avatar', token: secret(), model: 'test' }) });
+  assert.equal(missing.status, 400);
+  await client(server)('/api/join', { name: 'Unsafe Avatar', token: secret(), model: 'test', avatarSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><script>alert(1)</script></svg>' }, 400);
+  await client(server)('/api/join', { name: 'No ViewBox', token: secret(), model: 'test', avatarSvg: '<svg xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg>' }, 400);
+  await client(server)('/api/join', { name: 'External Ref', token: secret(), model: 'test', avatarSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><image href="http://example.test/a.png"/></svg>' }, 400);
+
+  const token = secret(), member = client(server, token);
+  const joined = await member('/api/join', { name: 'Avatar A', token, model: 'test' });
+  assert.equal(joined.agent.avatarHash.length, 16);
+  const id = joined.agent.id;
+  await admin(`/api/admin/agents/${id}`, { status: 'active' });
+  let bytes = await fetch(`${server.url}/api/avatars/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(bytes.status, 200);
+  assert.equal(bytes.headers.get('content-type'), 'image/svg+xml; charset=utf-8');
+  assert.equal(await bytes.text(), AVATAR);
+  bytes = await fetch(`${server.url}/api/avatars/${id}`, { headers: { Authorization: `Bearer ${server.admin}` } });
+  assert.equal(bytes.status, 200);
+
+  const next = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="#b45309"/></svg>';
+  const updated = await member('/api/avatar', { avatarSvg: next });
+  assert.notEqual(updated.avatarHash, joined.agent.avatarHash);
+  bytes = await fetch(`${server.url}/api/avatars/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(await bytes.text(), next);
+  const state = await admin('/api/admin/state?includeMessages=0');
+  const row = state.agents.find((agent) => agent.id === id);
+  assert.equal(row.avatarHash, updated.avatarHash);
+  assert.equal(row.avatarSvg, undefined);
+  assert.equal((await admin('/api/agents')).agents.find((agent) => agent.id === id).avatarHash, updated.avatarHash);
+
+  assert.equal((await member('/api/join', { name: 'Avatar A', token, model: 'test' }, 200)).agent.status, 'active');
+  await admin(`/api/admin/agents/${id}`, { status: 'paused' });
+  assert.equal((await member('/api/avatar', { avatarSvg: AVATAR })).avatarHash.length, 16);
+  await admin(`/api/admin/agents/${id}`, { status: 'revoked' });
+  await member('/api/avatar', { avatarSvg: AVATAR }, 403);
+  const revokedHash = (await admin('/api/agents')).agents.find((agent) => agent.id === id).avatarHash;
+  const revokedRejoin = await member('/api/join', { name: 'Avatar A', token, model: 'test', avatarSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><rect width="8" height="8" fill="#111111"/></svg>' }, 200);
+  assert.equal(revokedRejoin.agent.avatarHash, revokedHash);
+
+  await admin('/api/admin/registration', { open: false });
+  await client(server)('/api/join', { name: 'Avatar A', token: secret(), model: 'test' }, 403);
+});
+
+test('administrator can delete one message, cascade attachments, and bump the revision', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'delete-message-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const token = secret(), member = client(server, token);
+  const id = (await member('/api/join', { name: 'Delete Target', token, model: 'test' })).agent.id;
+  await admin(`/api/admin/agents/${id}`, { status: 'active' });
+
+  const attachment = await admin('/api/attachments', { name: 'note.txt', contentType: 'text/plain', data: Buffer.from('hello').toString('base64') }, 201);
+  const sent = await admin('/api/messages', { text: 'delete me', conversationId: 1, attachmentIds: [attachment.attachment.id] });
+  const keep = await admin('/api/messages', { text: 'keep me', conversationId: 1 });
+  assert.equal((await admin('/api/admin/state?includeMessages=0')).messageRevision, 0);
+
+  await member(`/api/admin/messages/${sent.message.id}/delete`, {}, 403);
+  await admin('/api/admin/messages/999999/delete', {}, 404);
+  const deleted = await admin(`/api/admin/messages/${sent.message.id}/delete`, {});
+  assert.equal(deleted.deletedId, sent.message.id);
+  assert.equal(deleted.messageRevision, 1);
+  assert.equal((await admin('/api/admin/state?includeMessages=0')).messageRevision, 1);
+  const messages = await admin('/api/messages?conversationId=1&after=0&limit=100');
+  assert.deepEqual(messages.messages.map((message) => message.id), [keep.message.id]);
+  assert.equal((await admin('/api/messages/search?conversationId=1&q=delete')).messages.length, 0);
+  await admin(`/api/attachments/${attachment.attachment.id}`, undefined, 404);
+  const audit = (await admin('/api/admin/state?includeMessages=0')).audit;
+  assert.ok(audit.some((entry) => entry.action === 'message.delete' && entry.target === String(sent.message.id)));
+  await admin(`/api/admin/messages/${sent.message.id}/delete`, {}, 404);
+});
+
+test('administrator can edit a message, mark it edited, and keep attachments valid', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'edit-message-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const token = secret(), member = client(server, token);
+  await member('/api/join', { name: 'Edit Member', token, model: 'test' });
+
+  const sent = await admin('/api/messages', { text: 'original edit me', conversationId: 1 });
+  await member(`/api/admin/messages/${sent.message.id}/edit`, { text: 'nope' }, 403);
+  await admin(`/api/admin/messages/${sent.message.id}/edit`, { text: '   ' }, 400);
+  await admin('/api/admin/messages/999999/edit', { text: 'missing' }, 404);
+  const edited = await admin(`/api/admin/messages/${sent.message.id}/edit`, { text: 'edited text' });
+  assert.equal(edited.messageRevision, 1);
+  assert.ok(edited.editedAt);
+  let page = await admin('/api/messages?conversationId=1&after=0&limit=10');
+  assert.equal(page.messages[0].text, 'edited text');
+  assert.ok(page.messages[0].editedAt);
+  assert.equal((await admin('/api/messages/search?conversationId=1&q=original')).messages.length, 0);
+  assert.equal((await admin('/api/messages/search?conversationId=1&q=edited')).messages.length, 1);
+  const audit = (await admin('/api/admin/state?includeMessages=0')).audit;
+  assert.ok(audit.some((entry) => entry.action === 'message.edit' && entry.target === String(sent.message.id)));
+
+  const upload = await admin('/api/attachments', { name: 'keep.txt', contentType: 'text/plain', data: Buffer.from('x').toString('base64') }, 201);
+  const withFile = await admin('/api/messages', { text: 'file text', conversationId: 1, attachmentIds: [upload.attachment.id] });
+  await admin(`/api/admin/messages/${withFile.message.id}/edit`, { text: '' });
+  page = await admin('/api/messages?conversationId=1&after=0&limit=10');
+  assert.equal(page.messages.find((message) => message.id === withFile.message.id).text, '');
+});
+
+test('administrator can pin and unpin one message per conversation', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'pin-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const token = secret(), member = client(server, token);
+  await member('/api/join', { name: 'Pin Member', token, model: 'test' });
+
+  const first = await admin('/api/messages', { text: 'first pin candidate', conversationId: 1 });
+  const second = await admin('/api/messages', { text: 'second pin candidate', conversationId: 1 });
+  await member(`/api/admin/messages/${first.message.id}/pin`, { pinned: true }, 403);
+  await admin('/api/admin/messages/999999/pin', { pinned: true }, 404);
+  await admin(`/api/admin/messages/${first.message.id}/pin`, { pinned: 'yes' }, 400);
+  await admin(`/api/admin/messages/${first.message.id}/pin`, { pinned: true });
+  let state = await admin('/api/admin/state?includeMessages=0');
+  assert.equal(state.pinnedMessageId, first.message.id);
+  assert.equal(state.pinnedMessage.id, first.message.id);
+  assert.equal(state.pinnedMessage.text, 'first pin candidate');
+  assert.equal(state.conversations.find((conversation) => conversation.id === 1).pinnedMessageId, first.message.id);
+
+  await admin(`/api/admin/messages/${second.message.id}/pin`, { pinned: true });
+  state = await admin('/api/admin/state?includeMessages=0');
+  assert.equal(state.pinnedMessageId, second.message.id);
+  assert.equal(state.pinnedMessage.text, 'second pin candidate');
+
+  await admin(`/api/admin/messages/${second.message.id}/pin`, { pinned: false });
+  state = await admin('/api/admin/state?includeMessages=0');
+  assert.equal(state.pinnedMessageId, null);
+  assert.equal(state.pinnedMessage, null);
+
+  await admin(`/api/admin/messages/${first.message.id}/pin`, { pinned: true });
+  await admin(`/api/admin/messages/${first.message.id}/delete`, {});
+  state = await admin('/api/admin/state?includeMessages=0');
+  assert.equal(state.pinnedMessageId, null);
+  const audit = state.audit;
+  assert.ok(audit.some((entry) => entry.action === 'message.pin'));
+  assert.ok(audit.some((entry) => entry.action === 'message.unpin'));
+});
+
+test('message search can filter by sender while keeping visibility', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'search-sender-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const tokenA = secret(), tokenB = secret();
+  const agentA = client(server, tokenA), agentB = client(server, tokenB);
+  const idA = (await agentA('/api/join', { name: 'Sender A', token: tokenA, model: 'test' })).agent.id;
+  await agentB('/api/join', { name: 'Sender B', token: tokenB, model: 'test' });
+  await admin(`/api/admin/agents/${idA}`, { status: 'active' });
+  await admin('/api/admin/agents/bulk', { action: 'approve' });
+
+  await admin('/api/messages', { text: 'filter admin broadcast', conversationId: 1 });
+  const privateA = await admin('/api/messages', { text: 'filter admin private', to: idA, conversationId: 1 });
+  const fromA = await agentA('/api/messages', { text: 'filter from A', conversationId: 1 });
+  const fromB = await agentB('/api/messages', { text: 'filter from B', conversationId: 1 });
+
+  const adminSender = await admin(`/api/messages/search?conversationId=1&q=filter&from=admin`);
+  assert.deepEqual(adminSender.messages.map((message) => message.id), [privateA.message.id, 1]);
+  const aSender = await admin(`/api/messages/search?conversationId=1&q=filter&from=${idA}`);
+  assert.deepEqual(aSender.messages.map((message) => message.id), [fromA.message.id]);
+  const bSender = await admin(`/api/messages/search?conversationId=1&q=filter&from=${fromB.message.from}`);
+  assert.deepEqual(bSender.messages.map((message) => message.id), [fromB.message.id]);
+
+  const memberBSearch = await agentB(`/api/messages/search?conversationId=1&q=filter&from=admin`);
+  assert.deepEqual(memberBSearch.messages.map((message) => message.id), [1]);
+  const memberAFromA = await agentB(`/api/messages/search?conversationId=1&q=filter&from=${idA}`);
+  assert.deepEqual(memberAFromA.messages.map((message) => message.id), [fromA.message.id]);
+  assert.equal((await admin('/api/messages/search?conversationId=1&q=filter&from=00000000-0000-4000-8000-000000000000')).messages.length, 0);
+  const timeline = await admin(`/api/messages/search?conversationId=1&from=${idA}`);
+  assert.deepEqual(timeline.messages.map((message) => message.id), [fromA.message.id]);
+  assert.equal(timeline.query, '');
+  await admin('/api/messages/search?conversationId=1', undefined, 400);
+  await admin('/api/messages/search?conversationId=1&q=filter&from=x', undefined, 400);
+});
+
+test('message search matches literal text and respects member visibility', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'search-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const tokenA = secret(), tokenB = secret();
+  const agentA = client(server, tokenA), agentB = client(server, tokenB);
+  const idA = (await agentA('/api/join', { name: 'Search A', token: tokenA, model: 'test' })).agent.id;
+  await agentB('/api/join', { name: 'Search B', token: tokenB, model: 'test' });
+  await admin(`/api/admin/agents/${idA}`, { status: 'active' });
+  await admin('/api/admin/agents/bulk', { action: 'approve' });
+
+  await admin('/api/messages', { text: 'alpha 100% done', conversationId: 1 });
+  const directed = await admin('/api/messages', { text: 'secret alpha plan', to: idA, conversationId: 1 });
+  await admin('/api/messages', { text: 'beta only', conversationId: 1 });
+
+  const adminHits = await admin('/api/messages/search?conversationId=1&q=alpha');
+  assert.equal(adminHits.query, 'alpha');
+  assert.deepEqual(adminHits.messages.map((message) => message.id), [directed.message.id, 1]);
+  assert.equal((await admin('/api/messages/search?conversationId=1&q=ALPHA')).messages.length, 2);
+  const wildcard = await admin('/api/messages/search?conversationId=1&q=' + encodeURIComponent('%'));
+  assert.equal(wildcard.messages.length, 1);
+  assert.equal(wildcard.messages[0].text, 'alpha 100% done');
+
+  const observer = await agentB('/api/messages/search?conversationId=1&q=alpha');
+  assert.deepEqual(observer.messages.map((message) => message.id), [1]);
+  const recipient = await agentA('/api/messages/search?conversationId=1&q=alpha');
+  assert.deepEqual(recipient.messages.map((message) => message.id), [directed.message.id, 1]);
+
+  await admin('/api/messages/search?conversationId=1', undefined, 400);
+  await admin('/api/messages/search?conversationId=1&q=' + encodeURIComponent('   '), undefined, 400);
+  await admin('/api/messages/search?conversationId=1&q=alpha&limit=0', undefined, 400);
+  await admin('/api/messages/search?conversationId=1&q=alpha&extra=1', undefined, 400);
+});
+
+test('conversation lists expose latestMessageId with member visibility scoping', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'unread-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const tokenA = secret(), tokenB = secret();
+  const agentA = client(server, tokenA), agentB = client(server, tokenB);
+  const idA = (await agentA('/api/join', { name: 'Unread A', token: tokenA, model: 'test' })).agent.id;
+  await agentB('/api/join', { name: 'Unread B', token: tokenB, model: 'test' });
+  await admin(`/api/admin/agents/${idA}`, { status: 'active' });
+  await admin('/api/admin/agents/bulk', { action: 'approve' });
+
+  const second = await admin('/api/admin/conversations', { title: '第二对话' }, 201);
+  const before = (await admin('/api/conversations')).conversations.find((conversation) => conversation.id === second.conversation.id);
+  assert.equal(before.latestMessageId, 0);
+
+  const first = await admin('/api/messages', { text: '广播消息', conversationId: second.conversation.id });
+  const directed = await admin('/api/messages', { text: '只给 A', to: idA, conversationId: second.conversation.id });
+  assert.ok(directed.message.id > first.message.id);
+
+  const adminConversations = (await admin('/api/conversations')).conversations;
+  const adminRow = adminConversations.find((conversation) => conversation.id === second.conversation.id);
+  assert.equal(adminRow.latestMessageId, directed.message.id);
+  const stateRow = (await admin('/api/admin/state?includeMessages=0')).conversations.find((conversation) => conversation.id === second.conversation.id);
+  assert.equal(stateRow.latestMessageId, directed.message.id);
+
+  const memberConversations = (await agentB('/api/conversations')).conversations;
+  assert.equal(memberConversations.find((conversation) => conversation.id === second.conversation.id).latestMessageId, first.message.id);
+  const recipientConversations = (await agentA('/api/conversations')).conversations;
+  assert.equal(recipientConversations.find((conversation) => conversation.id === second.conversation.id).latestMessageId, directed.message.id);
+});
+
+test('administrator health reports storage, counts, uptime and rejects members', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'health-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const token = secret(), member = client(server, token);
+  await member('/api/join', { name: 'Health Member', token, model: 'test' });
+  await admin('/api/messages', { text: 'health message', conversationId: 1 });
+  await admin('/api/tasks', { title: 'health task', conversationId: 1 });
+  await admin('/api/attachments', { name: 'h.txt', contentType: 'text/plain', data: Buffer.from('x').toString('base64') }, 201);
+
+  const health = await admin('/api/admin/health');
+  assert.equal(typeof health.version, 'string');
+  assert.match(health.node, /^v\d+/);
+  assert.ok(health.uptimeSeconds >= 0);
+  assert.ok(Number.isInteger(health.port) && health.port > 0);
+  assert.ok(health.databaseBytes > 0);
+  assert.ok(health.walBytes >= 0);
+  assert.equal(health.counts.agents, 1);
+  assert.equal(health.counts.messages, 1);
+  assert.equal(health.counts.tasks, 1);
+  assert.equal(health.counts.conversations, 1);
+  assert.equal(health.counts.attachments, 1);
+  assert.ok(health.memory.rss > 0);
+  assert.equal(health.messageRevision, 0);
+  assert.ok(!JSON.stringify(health).includes(server.admin));
+  await member('/api/admin/health', undefined, 403);
+});
+
+test('admin state can omit messages and exposes latestMessageId', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'light-state-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  const sent = await admin('/api/messages', { text: '轻量状态测试', conversationId: 1 });
+  const full = await admin('/api/admin/state');
+  assert.equal(full.latestMessageId, sent.message.id);
+  assert.equal(full.messages.length, 1);
+  assert.equal(full.messages[0].id, sent.message.id);
+  const light = await admin('/api/admin/state?includeMessages=0');
+  assert.equal(light.latestMessageId, sent.message.id);
+  assert.deepEqual(light.messages, []);
+  assert.equal(light.agents.length, full.agents.length);
+  assert.equal(light.audit.length, full.audit.length);
+  assert.equal(light.tasks.length, full.tasks.length);
+  await admin('/api/admin/state?includeMessages=1', undefined, 200);
+  await admin('/api/admin/state?includeMessages=yes', undefined, 400);
+});
+
+test('activity reports are validated, per-member, and exposed to monitors', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'activity-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  const tokenA = secret(), tokenB = secret();
+  const agentA = client(server, tokenA), agentB = client(server, tokenB);
+  await admin('/api/admin/registration', { open: true });
+  const idA = (await agentA('/api/join', { name: 'Activity A', token: tokenA, model: 'test' })).agent.id;
+  const idB = (await agentB('/api/join', { name: 'Activity B', token: tokenB, model: 'test' })).agent.id;
+  await admin(`/api/admin/agents/${idA}`, { status: 'active' });
+  await admin(`/api/admin/agents/${idB}`, { status: 'active' });
+
+  await admin('/api/activity', { state: 'thinking' }, 403);
+  await agentA('/api/activity', { state: 'busy' }, 400);
+  await agentA('/api/activity', { state: 'thinking', surprise: true }, 400);
+  await agentA('/api/activity', { state: 'thinking', detail: 'x'.repeat(81) }, 400);
+
+  const reported = await agentA('/api/activity', { state: 'thinking', detail: '分析消息' });
+  assert.equal(reported.activity.state, 'thinking');
+  assert.equal(reported.activity.detail, '分析消息');
+  let agents = (await admin('/api/agents')).agents;
+  let a = agents.find(row => row.id === idA), b = agents.find(row => row.id === idB);
+  assert.equal(a.activity.state, 'thinking');
+  assert.equal(a.activity.detail, '分析消息');
+  assert.equal(a.online, true);
+  assert.equal(b.activity, null);
+  assert.equal(b.online, false);
+
+  await agentA('/api/activity', { state: 'generating' });
+  agents = (await admin('/api/agents')).agents;
+  a = agents.find(row => row.id === idA);
+  assert.equal(a.activity.state, 'generating');
+  assert.equal(a.activity.detail, '');
+
+  const state = await admin('/api/admin/state');
+  a = state.agents.find(row => row.id === idA);
+  assert.equal(a.activity.state, 'generating');
+  assert.equal(state.agents.find(row => row.id === idB).activity, null);
+
+  const memberView = await agentB('/api/agents');
+  assert.equal(memberView.agents.find(row => row.id === idA).activity.state, 'generating');
+
+  await admin(`/api/admin/agents/${idB}`, { status: 'paused' });
+  assert.equal((await agentB('/api/activity', { state: 'idle' })).activity.state, 'idle');
+  assert.equal((await admin('/api/agents')).agents.find(row => row.id === idB).activity.state, 'idle');
+  await admin(`/api/admin/agents/${idB}`, { status: 'revoked' });
+  await agentB('/api/activity', { state: 'thinking' }, 403);
+});
+
+test('bridge mirrors thinking, explicit generating, and idle to the monitor', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'activity-bridge-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const identity = join(data, 'bridge.key');
+  const mcp = bridge(server, 'Activity Bridge', identity);
+  t.after(async () => stop(mcp.child));
+  const joined = JSON.parse((await mcp.call('chat_join')).result.content[0].text);
+  const id = joined.agent.id;
+  await admin(`/api/admin/agents/${id}`, { status: 'active' });
+  const presence = async () => (await admin('/api/agents')).agents.find(row => row.id === id);
+
+  const first = await admin('/api/messages', { text: '第一项任务', conversationId: 1 });
+  const read = JSON.parse((await mcp.call('chat_read', { conversationId: 1, after: 0 })).result.content[0].text);
+  assert.ok(read.messages.some(message => message.id === first.message.id));
+  assert.equal((await presence()).activity.state, 'thinking');
+
+  const generating = JSON.parse((await mcp.call('chat_activity', { state: 'generating', detail: '撰写回复' })).result.content[0].text);
+  assert.equal(generating.activity.state, 'generating');
+  assert.equal((await presence()).activity.detail, '撰写回复');
+
+  await mcp.call('chat_send', { conversationId: 1, text: '收到第一项任务' });
+  assert.equal((await presence()).activity.state, 'idle');
+
+  await admin('/api/messages', { text: '第二项任务', conversationId: 1 });
+  const wait = JSON.parse((await mcp.call('chat_wait', { conversationId: 1, after: read.cursor, timeout: 1000 })).result.content[0].text);
+  assert.ok(wait.messages.length > 0);
+  assert.equal((await presence()).activity.state, 'thinking');
+});
+
+test('bridge chat_search respects member visibility and validates arguments', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'bridge-search-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const identity = join(data, 'search-bridge.key');
+  const mcp = bridge(server, 'Search Bridge', identity);
+  t.after(async () => stop(mcp.child));
+  const joined = JSON.parse((await mcp.call('chat_join')).result.content[0].text);
+  await admin(`/api/admin/agents/${joined.agent.id}`, { status: 'active' });
+
+  const otherToken = secret(), other = client(server, otherToken);
+  const otherId = (await other('/api/join', { name: 'Search Other', token: otherToken, model: 'test' })).agent.id;
+  await admin(`/api/admin/agents/${otherId}`, { status: 'active' });
+
+  const broadcast = await admin('/api/messages', { text: 'bridge alpha broadcast', conversationId: 1 });
+  const directed = await admin('/api/messages', { text: 'alpha private for other', to: otherId, conversationId: 1 });
+  await admin('/api/messages', { text: 'bridge beta', conversationId: 1 });
+  await admin('/api/messages', { text: '100% literal', conversationId: 1 });
+
+  const result = JSON.parse((await mcp.call('chat_search', { conversationId: 1, q: 'alpha' })).result.content[0].text);
+  assert.deepEqual(result.messages.map((message) => message.id), [broadcast.message.id]);
+  assert.ok(!result.messages.some((message) => message.id === directed.message.id));
+  const limited = JSON.parse((await mcp.call('chat_search', { conversationId: 1, q: 'bridge', limit: 1 })).result.content[0].text);
+  assert.equal(limited.messages.length, 1);
+  const literal = JSON.parse((await mcp.call('chat_search', { conversationId: 1, q: '%' })).result.content[0].text);
+  assert.deepEqual(literal.messages.map((message) => message.text), ['100% literal']);
+  const fromAdmin = JSON.parse((await mcp.call('chat_search', { conversationId: 1, q: 'alpha', from: 'admin' })).result.content[0].text);
+  assert.deepEqual(fromAdmin.messages.map((message) => message.id), [broadcast.message.id]);
+  const fromBridge = JSON.parse((await mcp.call('chat_search', { conversationId: 1, q: 'alpha', from: joined.agent.id })).result.content[0].text);
+  assert.equal(fromBridge.messages.length, 0);
+  const timeline = JSON.parse((await mcp.call('chat_search', { conversationId: 1, from: 'admin' })).result.content[0].text);
+  assert.equal(timeline.messages.length, 3);
+  assert.equal((await mcp.call('chat_search', { conversationId: 1, q: 'alpha', from: 'x' })).result.isError, true);
+  assert.equal((await mcp.call('chat_search', { conversationId: 1, q: 'alpha', from: joined.agent.id.toUpperCase() })).result.isError, true);
+  assert.equal((await mcp.call('chat_search', { conversationId: 1, q: '' })).result.isError, true);
+  assert.equal((await mcp.call('chat_search', { conversationId: 1, q: 'alpha', limit: 0 })).result.isError, true);
+});
+
+test('members can read only pinned messages visible to them', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'pinned-read-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const identity = join(data, 'pinned-bridge.key');
+  const mcp = bridge(server, 'Pinned Bridge', identity);
+  t.after(async () => stop(mcp.child));
+  const joined = JSON.parse((await mcp.call('chat_join')).result.content[0].text);
+  await admin(`/api/admin/agents/${joined.agent.id}`, { status: 'active' });
+  const otherToken = secret(), other = client(server, otherToken);
+  const otherId = (await other('/api/join', { name: 'Pinned Other', token: otherToken, model: 'test' })).agent.id;
+  await admin(`/api/admin/agents/${otherId}`, { status: 'active' });
+
+  const broadcast = await admin('/api/messages', { text: 'pinned broadcast rule', conversationId: 1 });
+  await admin(`/api/admin/messages/${broadcast.message.id}/pin`, { pinned: true });
+  let result = JSON.parse((await mcp.call('chat_pinned', { conversationId: 1 })).result.content[0].text);
+  assert.equal(result.pinnedMessage.text, 'pinned broadcast rule');
+  assert.equal((await other('/api/pinned?conversationId=1')).pinnedMessage.text, 'pinned broadcast rule');
+
+  const directed = await admin('/api/messages', { text: 'pinned private for other', to: otherId, conversationId: 1 });
+  await admin(`/api/admin/messages/${directed.message.id}/pin`, { pinned: true });
+  result = JSON.parse((await mcp.call('chat_pinned', { conversationId: 1 })).result.content[0].text);
+  assert.equal(result.pinnedMessage, null);
+  const bridgeConversations = JSON.parse((await mcp.call('chat_conversations')).result.content[0].text);
+  assert.equal(bridgeConversations.conversations.find((conversation) => conversation.id === 1).pinnedMessageId, null);
+  const otherConversations = await other('/api/conversations');
+  assert.equal(otherConversations.conversations.find((conversation) => conversation.id === 1).pinnedMessageId, directed.message.id);
+  assert.equal((await other('/api/pinned?conversationId=1')).pinnedMessage.text, 'pinned private for other');
+
+  await other(`/api/admin/messages/${directed.message.id}/pin`, { pinned: false }, 403);
+  await admin(`/api/admin/messages/${directed.message.id}/pin`, { pinned: false });
+  result = JSON.parse((await mcp.call('chat_pinned', { conversationId: 1 })).result.content[0].text);
+  assert.equal(result.pinnedMessage, null);
+  await other('/api/pinned?conversationId=999', undefined, 404);
+  await other('/api/pinned?conversationId=1&extra=1', undefined, 400);
+});
+
 test('automatic audit waits for an active member and can be drawn later', { timeout: 30000 }, async t => {
   const data = await mkdtemp(join(tempRoot, 'audit-pending-'));
   let server = await start(data);
@@ -458,6 +927,83 @@ test('automatic audit waits for an active member and can be drawn later', { time
   admin = client(server, server.admin);
   assert.equal((await admin('/api/scoring')).leaderboard.find(row => row.agentId === id).points, 7);
   assert.equal((await admin('/api/admin/scoring/rounds', { roundKey: key })).round.id, drawn.id);
+});
+
+test('administrator can rename a conversation with validation and audit', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'rename-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const token = secret(), member = client(server, token);
+  await member('/api/join', { name: 'Rename Member', token, model: 'test' });
+
+  const renamed = await admin('/api/admin/conversations/1/rename', { title: '  新标题  ' });
+  assert.equal(renamed.conversation.title, '新标题');
+  assert.equal(renamed.conversations.find((conversation) => conversation.id === 1).title, '新标题');
+  assert.equal((await admin('/api/admin/state?includeMessages=0')).conversations.find((conversation) => conversation.id === 1).title, '新标题');
+
+  await admin('/api/admin/conversations/1/rename', { title: '   ' }, 400);
+  await admin('/api/admin/conversations/1/rename', { title: 'x'.repeat(81) }, 400);
+  await admin('/api/admin/conversations/1/rename', {}, 400);
+  await admin('/api/admin/conversations/999/rename', { title: 'missing' }, 404);
+  await member('/api/admin/conversations/1/rename', { title: 'nope' }, 403);
+  const audit = (await admin('/api/admin/state?includeMessages=0')).audit;
+  assert.ok(audit.some((entry) => entry.action === 'conversation.rename' && entry.target === '1'));
+});
+
+test('administrator can assign a task to active members and reassign it', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'assign-task-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const tokenA = secret(), tokenB = secret(), tokenP = secret();
+  const agentA = client(server, tokenA), agentB = client(server, tokenB), pending = client(server, tokenP);
+  const idA = (await agentA('/api/join', { name: 'Assign A', token: tokenA, model: 'test' })).agent.id;
+  const idB = (await agentB('/api/join', { name: 'Assign B', token: tokenB, model: 'test' })).agent.id;
+  const idP = (await pending('/api/join', { name: 'Assign Pending', token: tokenP, model: 'test' })).agent.id;
+  await admin(`/api/admin/agents/${idA}`, { status: 'active' });
+  await admin(`/api/admin/agents/${idB}`, { status: 'active' });
+
+  const created = await admin('/api/tasks', { title: '指派任务', conversationId: 1 });
+  const taskId = created.task.id;
+  await agentA(`/api/admin/tasks/${taskId}/assign`, { owner: idB }, 403);
+  await admin(`/api/admin/tasks/${taskId}/assign`, { owner: idP }, 400);
+  await admin('/api/admin/tasks/999999/assign', { owner: idA }, 404);
+  await admin(`/api/admin/tasks/${taskId}/assign`, { owner: '00000000-0000-4000-8000-000000000000' }, 404);
+  const assigned = await admin(`/api/admin/tasks/${taskId}/assign`, { owner: idA });
+  assert.equal(assigned.task.status, 'claimed');
+  assert.equal(assigned.task.owner, idA);
+  const reassigned = await admin(`/api/admin/tasks/${taskId}/assign`, { owner: idB });
+  assert.equal(reassigned.task.status, 'claimed');
+  assert.equal(reassigned.task.owner, idB);
+  await admin(`/api/tasks/${taskId}`, { action: 'complete', conversationId: 1 });
+  await admin(`/api/admin/tasks/${taskId}/assign`, { owner: idA }, 409);
+  const audit = (await admin('/api/admin/state?includeMessages=0')).audit;
+  assert.ok(audit.some((entry) => entry.action === 'task.assign' && entry.target === String(taskId)));
+});
+
+test('administrator can delete a task with audit and permission checks', { timeout: 30000 }, async t => {
+  const data = await mkdtemp(join(tempRoot, 'delete-task-'));
+  const server = await start(data);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  const token = secret(), member = client(server, token);
+  await member('/api/join', { name: 'Task Member', token, model: 'test' });
+
+  const created = await admin('/api/tasks', { title: '待删除任务', description: '清理', conversationId: 1 });
+  const taskId = created.task.id;
+  assert.equal((await admin('/api/tasks?conversationId=1')).tasks.length, 1);
+  await member(`/api/admin/tasks/${taskId}/delete`, {}, 403);
+  await admin('/api/admin/tasks/999999/delete', {}, 404);
+  const deleted = await admin(`/api/admin/tasks/${taskId}/delete`, {});
+  assert.equal(deleted.deletedId, taskId);
+  assert.deepEqual((await admin('/api/tasks?conversationId=1')).tasks, []);
+  const audit = (await admin('/api/admin/state?includeMessages=0')).audit;
+  assert.ok(audit.some((entry) => entry.action === 'task.delete' && entry.target === String(taskId)));
+  await admin(`/api/admin/tasks/${taskId}/delete`, {}, 404);
 });
 
 test('conversation deletion removes its messages and tasks and keeps one conversation', { timeout: 30000 }, async t => {
