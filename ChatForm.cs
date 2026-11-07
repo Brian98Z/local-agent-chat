@@ -1366,9 +1366,10 @@ internal sealed class ChatForm : Form
         senders.Add(new KeyValuePair<string, string>("admin", "管理员"));
         foreach (AgentData agent in agents.Values) if (agent.Status != "revoked") senders.Add(new KeyValuePair<string, string>(agent.Id, agent.Name));
         senders.Sort(delegate(KeyValuePair<string, string> left, KeyValuePair<string, string> right) { return StringComparer.CurrentCultureIgnoreCase.Compare(left.Value, right.Value); });
-        searchSender.DataSource = senders;
+        searchSender.Items.Clear();
+        foreach (KeyValuePair<string, string> sender in senders) searchSender.Items.Add(sender);
         int allSendersIndex = senders.FindIndex(delegate(KeyValuePair<string, string> item) { return item.Key.Length == 0; });
-        if (allSendersIndex >= 0) searchSender.SelectedIndex = allSendersIndex;
+        if (allSendersIndex >= 0 && allSendersIndex < searchSender.Items.Count) searchSender.SelectedIndex = allSendersIndex;
         var go = MakeButton("SearchGoButton", "搜索", true);
         go.Dock = DockStyle.Fill;
         go.Margin = new Padding(0, 0, 8, 4);
