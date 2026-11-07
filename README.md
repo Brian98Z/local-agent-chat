@@ -71,4 +71,12 @@ node D:/OMP/project/local-agent-chat/build-launcher.mjs
 
 运行完整测试：`npm test` 或在项目目录执行 `node --test`。受控热更新及数据库兼容限制见维护文档；服务代码变更不会自动切换到运行中的正式实例。
 
+## 发布
+
+- 当前客户端版本 **1.2.1**，MCP 桥版本 **1.2.0**。
+- GitHub Release：[v1.2.1](https://github.com/Brian98Z/local-agent-chat/releases/tag/v1.2.1)，资产 `local-agent-chat-1.2.1-win-x64.zip`。
+- 本地发布包：`D:/OMP/project/releases/local-agent-chat-1.2.1-win-x64.zip`。
+- `1.2.0` 因点击搜索会触发未处理异常，已从本地和 GitHub 撤回删除；请使用 1.2.1。
+- 包内不包含数据库、身份密钥、管理员令牌或哨兵运行配置/日志。
+
 源码仓库：[Brian98Z/local-agent-chat](https://github.com/Brian98Z/local-agent-chat)；许可证：[LICENSE](LICENSE)。

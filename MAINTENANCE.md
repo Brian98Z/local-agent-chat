@@ -36,7 +36,7 @@
 | `create-shortcut.ps1`、`start.cmd` | 桌面原生入口；独立浏览器版启动入口 |
 | `chat.test.mjs` | 真实 HTTP、MCP 子进程、重启、旧库迁移、隔离和重连回归 |
 | `vote-game-tools.test.mjs`、`erc20-tools.test.mjs` | 内存SQLite业务边界及受控RPC核验；支付测试无真实交易，不能当作资金到账证明。 |
-| `package.json` | npm start/test和运行时声明；当前包/桥版本1.2.0，npm test运行全部测试，不代表数据库schema版本 |
+| `package.json` | npm start/test和运行时声明；当前客户端包1.2.1、MCP桥1.2.0，npm test运行全部测试，不代表数据库schema版本 |
 
 原生路径：用户 → EXE → 隐藏 Node/host → HTTP/SQLite；窗口由启动器以内存参数得到管理员凭据。智能体路径：客户端 → stdio MCP 桥 → 同一 HTTP 服务。浏览器路径：人工独立运行服务 → 网页粘贴本次管理员令牌。
 
@@ -193,7 +193,7 @@ node D:/OMP/project/local-agent-chat/server.mjs --port 4323 --data-dir D:/OMP/te
 3. 只在入口路径改变时重建快捷方式；目标不变无需反复重建。新MCP工具发布后通知客户端重载。
 4. 维护本文、README、CONTRACT和MCP各自权威范围；桌面MCP文档从MCP.md同步，禁止双向合并。
 5. 回滚先停止服务。只回退EXE不足以回退已变更的数据库；须检查schema兼容性，必要时恢复匹配备份。恢复会损失备份后的新记录，必须先告知用户并获准，不能擅自覆盖。
-6. 本次用户要求全部规划项完成后再统一清理过程文件；完成前保留测试脚本、截图、版本与日志。最终清理前确认没有自有进程持有文件，再运行 `node D:/OMP/.omp/bin/clean-temp.mjs --all`；不清理工程 data 或桌面产物，避免影响并行任务。
+6. 过程文件只放在 `D:/OMP/temp`，任务收尾运行 `node D:/OMP/.omp/bin/clean-temp.mjs --all` 并确认为空；不清理工程 `data/`、正式发布包或桌面产物。清理前确认没有自有客户端/服务进程持有文件；验证截图、日志和临时构建目录随任务清理，不进入发布包。
 
 ### 启动入口的安全告警
 
@@ -207,6 +207,11 @@ node D:/OMP/project/local-agent-chat/server.mjs --port 4323 --data-dir D:/OMP/te
 - 凭据从用户指定配置在内存中读取，不写入仓库、远程URL、提交信息或日志。推送前审查待提交文件清单；不强推覆盖他人提交。
 - 本机 Git HTTPS 首次传输遇连接重置/空响应，可改用官方 Git Data API。令牌须对目标仓库具备 Contents: Read and write；仅能读取仓库不代表能创建blob。API方式必须保留原main为父提交、检查远程未变化、非强制更新引用并核对提交与文件树。凭据权限不足时保留本地提交，授权后继续，不改用公开凭据或强推。
 
+
+### 发布记录
+
+- 2026-11-07：客户端 **1.2.1** 发布，GitHub Release `v1.2.1`，资产 `local-agent-chat-1.2.1-win-x64.zip`，EXE SHA256 `f982e30f…`，ZIP SHA256 `18173a1f…`；修复点击搜索的 `SelectedIndex` 异常。
+- 同日撤回并删除客户端 `1.2.0` 的本地目录、ZIP、GitHub Release 与标签；源码提交历史保留。`1.2.0` 包不得继续分发。
 
 ### 桌面副本同步
 
