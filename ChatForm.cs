@@ -416,7 +416,7 @@ internal sealed class ChatForm : Form
 
     private ListView MakeList(string name, params string[] columns)
     {
-        var list = Identify(new RoundedListView(), name, name == "ConversationList" ? "历史对话列表" : "操作审计列表");
+        var list = Identify(new RoundedListView(), name, name == "ConversationList" ? "历史对话列表" : "操作记录列表");
         list.Dock = DockStyle.Fill;
         list.View = View.Details;
         list.FullRowSelect = true;
@@ -461,28 +461,34 @@ internal sealed class ChatForm : Form
         groupTitle = Identify(new Label { Text = "本地协作群", Dock = DockStyle.Fill, Font = new Font(Font.FontFamily, 16F, FontStyle.Bold), ForeColor = ink, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true }, "GroupTitle", "本地协作群");
         groupSubtitle = new Label { Text = "人工指令 · 实时协作", Dock = DockStyle.Fill, ForeColor = muted, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
         connectionLabel = Identify(new Label { Text = "●  正在连接", Dock = DockStyle.Fill, ForeColor = muted, TextAlign = ContentAlignment.MiddleRight }, "ConnectionIndicator", "正在连接本机服务");
-        var headingActions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
+        var headingActions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty, Padding = Padding.Empty };
+        headingActions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        headingActions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+        headingActions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var primaryActions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
         var searchButton = MakeToolbarButton("SearchButton", "搜索", false, 80);
         searchButton.Click += delegate { ShowSearchDialog(); };
         var tasksButton = MakeToolbarButton("TasksButton", "任务", false, 80);
         tasksButton.Click += async delegate { await ShowTasksDialogAsync(); };
         var scoringButton = MakeToolbarButton("ScoringButton", "工作证明", false, 96);
         scoringButton.Click += async delegate { await ShowScoringAsync(); await RefreshLeaderboardAsync(true); };
-        var auditButton = MakeToolbarButton("AuditToggle", "操作审计", false, 96);
+        var auditButton = MakeToolbarButton("AuditToggle", "操作记录", false, 96);
         auditButton.Click += delegate { ShowAuditDialog(); };
         var docButton = MakeToolbarButton("McpDocButton", "接入文档", false, 96);
         docButton.AccessibleName = "保存 MCP 接入文档";
+        docButton.Dock = DockStyle.Fill;
         docButton.Margin = Padding.Empty;
         docButton.Click += delegate { SaveConnectionDocument(); };
         var healthButton = MakeToolbarButton("HealthButton", "状态", false, 72);
-        healthButton.Margin = new Padding(6, 0, 0, 0);
+        healthButton.Margin = Padding.Empty;
         healthButton.Click += async delegate { await ShowHealthDialogAsync(); };
-        headingActions.Controls.Add(searchButton);
-        headingActions.Controls.Add(tasksButton);
-        headingActions.Controls.Add(scoringButton);
-        headingActions.Controls.Add(auditButton);
-        headingActions.Controls.Add(docButton);
-        headingActions.Controls.Add(healthButton);
+        primaryActions.Controls.Add(searchButton);
+        primaryActions.Controls.Add(tasksButton);
+        primaryActions.Controls.Add(scoringButton);
+        primaryActions.Controls.Add(auditButton);
+        primaryActions.Controls.Add(healthButton);
+        headingActions.Controls.Add(primaryActions, 0, 0);
+        headingActions.Controls.Add(docButton, 1, 0);
         heading.Controls.Add(groupTitle, 0, 0);
         heading.Controls.Add(groupSubtitle, 0, 1);
         heading.Controls.Add(connectionLabel, 1, 0);
@@ -692,7 +698,7 @@ internal sealed class ChatForm : Form
         sendRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         sendRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88));
         sendRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
-        sendRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88));
+        sendRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
         sendRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
         attachmentLabel = new Label { Text = "回车发送 / Ctrl+回车换行", Dock = DockStyle.Fill, ForeColor = muted, TextAlign = ContentAlignment.MiddleLeft, Margin = Padding.Empty, AutoEllipsis = true };
         attachmentLabel.Name = "AttachmentSummary";
@@ -746,7 +752,7 @@ internal sealed class ChatForm : Form
         auditExportButton.Click += delegate { ExportAuditCsv(); };
         tools.Controls.Add(auditFilter, 0, 0);
         tools.Controls.Add(auditExportButton, 1, 0);
-        auditEmpty = new Label { Text = "正在读取审计…", Dock = DockStyle.Fill, ForeColor = muted };
+        auditEmpty = new Label { Text = "正在读取操作记录…", Dock = DockStyle.Fill, ForeColor = muted };
         auditList = MakeList("AuditList", "时间", "操作者", "操作", "对象");
         auditList.Columns[0].Width = 160;
         auditList.Columns[1].Width = 150;
@@ -778,7 +784,7 @@ internal sealed class ChatForm : Form
         var rows = FilteredAuditRows();
         ReconcileList(auditList, rows);
         bool filtering = auditFilter != null && auditFilter.Text.Trim().Length > 0;
-        auditEmpty.Text = rows.Count == 0 ? (filtering ? "没有匹配的审计记录。" : "暂无操作记录。") : "显示 " + rows.Count + " 条审计记录（服务最多提供最近 200 条）";
+        auditEmpty.Text = rows.Count == 0 ? (filtering ? "没有匹配的操作记录。" : "暂无操作记录。") : "显示 " + rows.Count + " 条操作记录（服务最多提供最近 200 条）";
     }
 
     private void ExportAuditCsv()
@@ -787,21 +793,21 @@ internal sealed class ChatForm : Form
         if (rows.Count == 0) return;
         using (var dialog = new SaveFileDialog())
         {
-            dialog.Title = "导出审计 CSV";
+            dialog.Title = "导出操作记录 CSV";
             dialog.Filter = "CSV 文件 (*.csv)|*.csv|所有文件 (*.*)|*.*";
             dialog.DefaultExt = "csv";
             dialog.AddExtension = true;
             dialog.OverwritePrompt = true;
-            dialog.FileName = "审计-" + DateTime.Now.ToString("yyyyMMdd-HHmm", CultureInfo.InvariantCulture) + ".csv";
+            dialog.FileName = "操作记录-" + DateTime.Now.ToString("yyyyMMdd-HHmm", CultureInfo.InvariantCulture) + ".csv";
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
             try
             {
                 int count = WriteAuditCsv(dialog.FileName);
-                SetStatus("已导出 " + count.ToString(CultureInfo.InvariantCulture) + " 条审计记录。", false);
+                SetStatus("已导出 " + count.ToString(CultureInfo.InvariantCulture) + " 条操作记录。", false);
             }
             catch (Exception ex)
             {
-                if (!stopping) SetStatus("导出审计失败 · " + FriendlyError(ex), true);
+                if (!stopping) SetStatus("导出操作记录失败 · " + FriendlyError(ex), true);
             }
         }
     }
@@ -829,7 +835,7 @@ internal sealed class ChatForm : Form
     private void ShowAuditDialog()
     {
         if (auditDialog != null && !auditDialog.IsDisposed) { auditDialog.Activate(); return; }
-        auditDialog = new Form { Name = "AuditDialog", Text = "操作审计", StartPosition = FormStartPosition.CenterParent, Size = new Size(840, 520), MinimumSize = new Size(640, 360), Font = Font, BackColor = Color.White, Padding = new Padding(18), ShowInTaskbar = false };
+        auditDialog = new Form { Name = "AuditDialog", Text = "操作记录", StartPosition = FormStartPosition.CenterParent, Size = new Size(840, 520), MinimumSize = new Size(640, 360), Font = Font, BackColor = Color.White, Padding = new Padding(18), ShowInTaskbar = false };
         auditDialog.Controls.Add(BuildAudit());
         auditList.Columns[0].Width = 165; auditList.Columns[1].Width = 140; auditList.Columns[2].Width = 150;
         auditList.Resize += delegate { if (auditList != null && !auditList.IsDisposed) auditList.Columns[3].Width = Math.Max(160, auditList.ClientSize.Width - 465); };
@@ -1014,6 +1020,7 @@ internal sealed class ChatForm : Form
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Margin = Padding.Empty };
         var close = new Button { Text = "关闭", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(76, 30) };
         var refresh = new Button { Text = "刷新", AutoSize = true, MinimumSize = new Size(76, 30) };
+        close.Click += delegate { dialog.Close(); };
         buttons.Controls.Add(close);
         buttons.Controls.Add(refresh);
         layout.Controls.Add(output, 0, 0);

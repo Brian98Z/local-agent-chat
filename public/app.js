@@ -33,12 +33,12 @@ function exportAuditCsv() {
   const url = URL.createObjectURL(blob);
   const link = node('a');
   link.href = url;
-  link.download = `审计-${dateStamp()}.csv`;
+  link.download = `操作记录-${dateStamp()}.csv`;
   document.body.append(link);
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  setText($('action-status'), `已导出 ${entries.length} 条审计记录。`);
+  setText($('action-status'), `已导出 ${entries.length} 条操作记录。`);
 }
 const agentCards = new Map();
 const taskCards = new Map();
@@ -849,7 +849,7 @@ function renderAudit() {
   }
   const filtering = ($('audit-filter')?.value ?? '').trim().length > 0;
   $('audit-empty').hidden = entries.length > 0;
-  setText($('audit-empty'), filtering ? '没有匹配的审计记录。' : '暂无操作记录。');
+  setText($('audit-empty'), filtering ? '没有匹配的操作记录。' : '暂无操作记录。');
 }
 function renderState() {
   setText($('registration-status'), state.registrationOpen ? '新成员登记已开启' : '新成员登记已关闭');
