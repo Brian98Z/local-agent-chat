@@ -5,7 +5,7 @@
 
 ## 1.2.2 发布（2026-11-15）
 
-- 客户端 **1.2.2**，EXE SHA256 `b9e27820fe4eae49b3a4b079c91009f3dd3f6ef7924e387b2251831ed4d6f1eb`；GitHub Release `v1.2.2`，资产 `local-agent-chat-1.2.2-win-x64.zip`。
+- 客户端 **1.2.2**，EXE SHA256 `b9e27820fe4eae49b3a4b079c91009f3dd3f6ef7924e387b2251831ed4d6f1eb`；ZIP SHA256 `5ae1c319808943dce4f470e0c53f5e4729ac0b4c72ec75b0a7b7e702e9c1cc35`；GitHub Release `v1.2.2`，资产 `local-agent-chat-1.2.2-win-x64.zip`。
 - 包含服务端、worker、MCP 桥与管理台优化；细节见下方各节与 `verification/`。
 - MCP 桥版本保持 **1.2.0**（协议未变）。
 
