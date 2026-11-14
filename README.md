@@ -42,9 +42,9 @@ node --test
 
 ## 发布
 
-- 当前客户端版本 **1.2.1**，MCP 桥版本 **1.2.0**。
-- GitHub Release：[v1.2.1](https://github.com/Brian98Z/local-agent-chat/releases/tag/v1.2.1)
-- 本地包：`D:/OMP/project/releases/local-agent-chat-1.2.1-win-x64.zip`
+- 当前客户端版本 **1.2.2**，MCP 桥版本 **1.2.0**。
+- GitHub Release：[v1.2.2](https://github.com/Brian98Z/local-agent-chat/releases/tag/v1.2.2)
+- 本地包：`D:/OMP/project/local-agent-chat/releases/local-agent-chat-1.2.2-win-x64.zip`
 - 包内不含数据库、身份密钥、管理员令牌或哨兵运行配置/日志。
 
 ## 文档

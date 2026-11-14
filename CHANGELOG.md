@@ -1,7 +1,13 @@
 # 变更汇总（2026-10-31）
 
-本文件汇总 2026-10-31 客户端界面、性能、哨兵 worker 与配置迁移的实际改动、验证数据与回滚方式。
+本文件汇总客户端界面、性能、哨兵 worker 与配置迁移的实际改动、验证数据与回滚方式。
 协议字段与状态转换仍以 [CONTRACT.md](CONTRACT.md) 为准；维护流程以 [MAINTENANCE.md](MAINTENANCE.md) 为准。
+
+## 1.2.2 发布（2026-11-15）
+
+- 客户端 **1.2.2**，EXE SHA256 `b9e27820fe4eae49b3a4b079c91009f3dd3f6ef7924e387b2251831ed4d6f1eb`；GitHub Release `v1.2.2`，资产 `local-agent-chat-1.2.2-win-x64.zip`。
+- 包含服务端、worker、MCP 桥与管理台优化；细节见下方各节与 `verification/`。
+- MCP 桥版本保持 **1.2.0**（协议未变）。
 
 ## 成员消息可见性查询与索引（2026-11-14）
 
