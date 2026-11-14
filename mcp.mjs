@@ -1,17 +1,48 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, readFile } from 'node:fs/promises';
-import { dirname, isAbsolute } from 'node:path';
+import { mkdir, open, readFile, rename, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, isAbsolute, join } from 'node:path';
 import { execFile } from 'node:child_process';
 
-async function displayLanguage() {
-  if (process.platform !== 'win32') return Intl.DateTimeFormat().resolvedOptions().locale;
+const LANGUAGE_CACHE = join(tmpdir(), 'local-agent-chat-display-language.json');
+const LANGUAGE_CACHE_TTL = 24 * 60 * 60 * 1000;
+const LANGUAGE_REFRESH_AFTER = 60 * 60 * 1000;
+const LANGUAGE_PATTERN = /^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$/;
+
+async function detectDisplayLanguage() {
   return new Promise((resolve, reject) => {
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$l = Get-WinUILanguageOverride; if ($l) { $l.Name } else { (Get-UICulture).Name }'], { windowsHide: true, timeout: 10000, encoding: 'utf8' }, (error, stdout) => {
-      if (error || !/^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$/.test(stdout.trim())) {
+      if (error || !LANGUAGE_PATTERN.test(stdout.trim())) {
         reject(new Error('无法读取本机显示语言，请检查 Windows PowerShell。'));
       } else resolve(stdout.trim());
     });
   });
+}
+
+async function cacheDisplayLanguage(language) {
+  try {
+    const pending = `${LANGUAGE_CACHE}.${process.pid}.tmp`;
+    await writeFile(pending, JSON.stringify({ language, at: Date.now() }), { mode: 0o600 });
+    await rename(pending, LANGUAGE_CACHE);
+  } catch { /* cache is best-effort; detection already succeeded */ }
+}
+
+// Spawning PowerShell costs about one second and every MCP client waits for initialize,
+// so the detected UI language is cached per user. Fresh entries answer instantly; entries
+// older than an hour are also refreshed in the background for the next connection.
+async function displayLanguage() {
+  if (process.platform !== 'win32') return Intl.DateTimeFormat().resolvedOptions().locale;
+  try {
+    const cached = JSON.parse(await readFile(LANGUAGE_CACHE, 'utf8'));
+    const age = Date.now() - (Number.isFinite(cached?.at) ? cached.at : 0);
+    if (cached && typeof cached.language === 'string' && LANGUAGE_PATTERN.test(cached.language) && age < LANGUAGE_CACHE_TTL) {
+      if (age >= LANGUAGE_REFRESH_AFTER) detectDisplayLanguage().then(cacheDisplayLanguage, () => {});
+      return cached.language;
+    }
+  } catch { /* no usable cache */ }
+  const language = await detectDisplayLanguage();
+  await cacheDisplayLanguage(language);
+  return language;
 }
 
 const usage = 'node mcp.mjs --name NAME --model MODEL --identity ABSOLUTE_KEY_FILE [--url http://127.0.0.1:4317] [--call TOOL --args JSON] [--text-file PATH] [--avatar PATH]';
@@ -61,11 +92,18 @@ const definitions = [
   ['task_release', '释放自己认领的任务。', { id, note: string(8000, 0) }, ['id']],
   ['task_complete', '完成自己认领的任务；note 写明结果与验证。', { id, note: string(8000, 0) }, ['id']],
 ].map(([name, description, properties, required]) => ({ name, description, inputSchema: { type: 'object', properties, required, additionalProperties: false } }));
+const definitionsByName = new Map(definitions.map(definition => [definition.name, definition]));
 
+const schemaPatterns = new Map();
+function schemaPattern(source) {
+  let pattern = schemaPatterns.get(source);
+  if (!pattern) { pattern = new RegExp(source); schemaPatterns.set(source, pattern); }
+  return pattern;
+}
 function validate(schema, value) {
   if (schema.anyOf) return schema.anyOf.some(s => validate(s, value));
   if (schema.type === 'null') return value === null;
-  if (schema.type === 'string') return typeof value === 'string' && value.length >= (schema.minLength ?? 0) && (schema.maxLength === undefined || value.length <= schema.maxLength) && (!schema.pattern || new RegExp(schema.pattern).test(value)) && (!schema.enum || schema.enum.includes(value));
+  if (schema.type === 'string') return typeof value === 'string' && value.length >= (schema.minLength ?? 0) && (schema.maxLength === undefined || value.length <= schema.maxLength) && (!schema.pattern || schemaPattern(schema.pattern).test(value)) && (!schema.enum || schema.enum.includes(value));
   if (schema.type === 'integer') return Number.isSafeInteger(value) && value >= schema.minimum && (schema.maximum === undefined || value <= schema.maximum);
   if (schema.type === 'array') return Array.isArray(value) && value.length <= schema.maxItems && value.every(item => validate(schema.items, item));
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -150,7 +188,7 @@ async function main() {
     }
   }
   async function call(toolName, args = {}) {
-    const def = definitions.find(d => d.name === toolName);
+    const def = definitionsByName.get(toolName);
     if (!def || !validate(def.inputSchema, args)) throw new Error('Unknown tool or invalid arguments');
     if (groupToolRoutes.has(toolName)) return request('/api/group-tools/invoke', { name: groupToolRoutes.get(toolName), arguments: args }, 15000);
     switch (toolName) {

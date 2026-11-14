@@ -1371,3 +1371,141 @@ test('administrator private text never becomes a title visible to other members'
   await admin('/api/messages', { conversationId: 1, text: 'Public task title' });
   assert.equal((await observer('/api/conversations')).conversations.find(conversation => conversation.id === 1).title, 'Public task title');
 });
+
+test('member message pages union visibility branches without duplicates or tail scans', { timeout: 60000 }, async t => {
+  const isolated = await mkdtemp(join(tempRoot, 'visibility-union-'));
+  const server = await start(isolated);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  const aToken = secret(), bToken = secret(), cToken = secret();
+  const a = client(server, aToken), b = client(server, bToken), c = client(server, cToken);
+  await admin('/api/admin/registration', { open: true });
+  const aid = (await a('/api/join', { name: 'UnionAlpha', token: aToken, model: 'test-model' })).agent.id;
+  const bid = (await b('/api/join', { name: 'UnionBeta', token: bToken, model: 'test-model' })).agent.id;
+  const cid = (await c('/api/join', { name: 'UnionGamma', token: cToken, model: 'test-model' })).agent.id;
+  for (const id of [aid, bid, cid]) await admin(`/api/admin/agents/${id}`, { status: 'active' });
+
+  // A member with no visible messages has no history boundary at all.
+  const emptyGamma = await c('/api/messages');
+  assert.deepEqual(emptyGamma.messages, []);
+  assert.equal(emptyGamma.earliest_available_id, null);
+
+  // Broadcast authored by A matches both the broadcast and the authored branch; it must appear once.
+  const broadcast = await a('/api/messages', { text: 'alpha broadcast' });
+  // A message A sent to itself matches both the directed and the authored branch; it must appear once.
+  const selfDirected = await a('/api/messages', { text: 'alpha self note', to: aid });
+  // Push the visible rows far behind the tail with traffic A cannot see.
+  for (let index = 0; index < 60; index += 1) await admin('/api/messages', { text: `private to beta ${index}`, to: bid });
+
+  const page = await a('/api/messages');
+  assert.deepEqual(page.messages.map(m => m.text), ['alpha broadcast', 'alpha self note']);
+  assert.deepEqual(page.messages.map(m => m.id), [broadcast.message.id, selfDirected.message.id]);
+  assert.equal(page.earliest_available_id, broadcast.message.id);
+  assert.equal(page.messages.filter(m => m.id === broadcast.message.id).length, 1);
+
+  const older = await a(`/api/messages?before=${selfDirected.message.id}`);
+  assert.deepEqual(older.messages.map(m => m.text), ['alpha broadcast']);
+  assert.equal(older.earliest_available_id, broadcast.message.id);
+
+  const beta = await b('/api/messages');
+  assert.equal(beta.messages.length, 61);
+  assert.equal(beta.messages[0].id, broadcast.message.id);
+  assert.equal(beta.earliest_available_id, broadcast.message.id);
+  const gamma = await c('/api/messages');
+  assert.deepEqual(gamma.messages.map(m => m.text), ['alpha broadcast']);
+  assert.equal(gamma.earliest_available_id, broadcast.message.id);
+  const adminPage = await admin('/api/messages');
+  assert.equal(adminPage.messages.length, 62);
+  assert.equal(adminPage.earliest_available_id, broadcast.message.id);
+});
+
+test('legacy clientPayload JSON is rewritten to a digest on idempotent retry', async t => {
+  const isolated = await mkdtemp(join(tempRoot, 'payload-digest-'));
+  let server = await start(isolated);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  const token = secret(), agent = client(server, token);
+  await admin('/api/admin/registration', { open: true });
+  const id = (await agent('/api/join', { name: 'DigestAgent', token, model: 'test-digest' })).agent.id;
+  await admin(`/api/admin/agents/${id}`, { status: 'active' });
+  const body = { conversationId: 1, text: 'digest retry', clientMessageId: 'legacy-1' };
+  const first = (await agent('/api/messages', body)).message;
+  await stop(server.child);
+
+  const db = new DatabaseSync(join(isolated, 'chat.sqlite'));
+  const legacy = JSON.stringify({ text: 'digest retry', to: null, replyTo: null, attachmentIds: [], kind: 'message' });
+  db.prepare('UPDATE messages SET clientPayload = ? WHERE id = ?').run(legacy, first.id);
+  db.close();
+
+  server = await start(isolated);
+  const second = (await client(server, token)('/api/messages', body)).message;
+  assert.equal(second.id, first.id);
+  await stop(server.child);
+  const after = new DatabaseSync(join(isolated, 'chat.sqlite'));
+  const row = after.prepare('SELECT clientPayload FROM messages WHERE id = ?').get(first.id);
+  after.close();
+  assert.match(row.clientPayload, /^sha256:[a-f0-9]{64}$/);
+
+  server = await start(isolated);
+  await client(server, token)('/api/messages', { ...body, text: 'different content' }, 409);
+});
+
+test('earliest available id reflects the first message inserted into an empty conversation', async t => {
+  const isolated = await mkdtemp(join(tempRoot, 'earliest-empty-'));
+  const server = await start(isolated);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  const token = secret(), member = client(server, token);
+  await admin('/api/admin/registration', { open: true });
+  const id = (await member('/api/join', { name: 'EarliestAgent', token, model: 'test-earliest' })).agent.id;
+  await admin(`/api/admin/agents/${id}`, { status: 'active' });
+  const before = await member('/api/messages');
+  assert.deepEqual(before.messages, []);
+  assert.equal(before.earliest_available_id, null);
+  const sent = (await admin('/api/messages', { text: 'first message' })).message;
+  const after = await member('/api/messages');
+  assert.equal(after.earliest_available_id, sent.id);
+  assert.equal(after.messages[0].id, sent.id);
+});
+
+test('static assets revalidate with ETag while index stays no-store', async t => {
+  const isolated = await mkdtemp(join(tempRoot, 'static-etag-'));
+  const server = await start(isolated);
+  t.after(async () => stop(server.child));
+  const first = await fetch(server.url + '/app.js');
+  assert.equal(first.status, 200);
+  const etag = first.headers.get('etag');
+  assert.match(etag, /^"[^"]+"$/);
+  assert.equal(first.headers.get('cache-control'), 'no-cache');
+  await first.arrayBuffer();
+  const revalidated = await fetch(server.url + '/app.js', { headers: { 'If-None-Match': etag } });
+  assert.equal(revalidated.status, 304);
+  assert.equal((await revalidated.arrayBuffer()).byteLength, 0);
+  const style = await fetch(server.url + '/style.css');
+  assert.equal(style.status, 200);
+  assert.equal(style.headers.get('cache-control'), 'no-cache');
+  await style.arrayBuffer();
+  const index = await fetch(server.url + '/');
+  assert.equal(index.status, 200);
+  assert.equal(index.headers.get('cache-control'), 'no-store');
+  await index.arrayBuffer();
+});
+
+test('admin state can omit audit rows without changing other sections', async t => {
+  const isolated = await mkdtemp(join(tempRoot, 'audit-omit-'));
+  const server = await start(isolated);
+  t.after(async () => stop(server.child));
+  const admin = client(server, server.admin);
+  await admin('/api/admin/registration', { open: true });
+  await admin('/api/tasks', { title: 'omit-test task' });
+  const full = await admin('/api/admin/state?includeAudit=1');
+  assert.ok(full.audit.length > 0);
+  assert.equal(full.tasks.length, 1);
+  const light = await admin('/api/admin/state?includeMessages=0&includeAudit=0&includeTasks=0');
+  assert.deepEqual(light.audit, []);
+  assert.deepEqual(light.tasks, []);
+  assert.equal(light.agents.length, full.agents.length);
+  assert.equal(light.conversations.length, full.conversations.length);
+  await admin('/api/admin/state?includeAudit=2', undefined, 400);
+  await admin('/api/admin/state?includeTasks=2', undefined, 400);
+});

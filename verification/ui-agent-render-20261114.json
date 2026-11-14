@@ -1,0 +1,42 @@
+{
+  "feature": "web admin member-card render signature",
+  "date": "2026-11-14",
+  "method": "headless managed Chromium; renderAgents called twice with 34 synthetic agents; one agent then renamed",
+  "results": {
+    "firstRender34Ms": 2.3,
+    "secondUnchangedRenderMs": 0,
+    "oneAgentRenamedRenderMs": 0.1,
+    "unchangedCardsReused": true,
+    "renamedCardUpdated": true,
+    "nonChangedCardsPreserved": true
+  },
+  "note": "Per-card signature covers name, model, status, avatarHash, presence text/kind and activity detail. Filtering still prunes cards; returning members are recreated. No state or storage is written by the test.",
+  "tests": "node --test: 176/176 passed (80.0 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "202d8f67f1c13322b2f0432f711881f77996935adda9c080725d56aaa6231781",
+    "build": "node --check on 18 modules (including public/app.js): exit 0",
+    "targetedTests": "17/17 passed (31.4 s)",
+    "managedRevision": "7ff56df4938f1003d33eeeb1e9646ae91c9438fa1f2d4119711d6a9f53bade9a-f5832e894f5c",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "public/app.js",
+      "sentinel.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately",
+      "browser render signatures were verified manually in headless Chromium; the node suite does not execute public/app.js."
+    ]
+  }
+}

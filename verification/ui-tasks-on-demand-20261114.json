@@ -1,0 +1,44 @@
+{
+  "feature": "on-demand task rows in admin state polls",
+  "date": "2026-11-14",
+  "method": "headless managed Chromium with a real server and admin token; one task created via API; state request query strings inspected through CDP",
+  "results": {
+    "tasksPanelTopPx": 1363.59,
+    "viewportHeightPx": 600,
+    "requestsBeforeScrollWithTasksOff": true,
+    "requestsBeforeScrollWithTasksOn": false,
+    "requestsAfterScrollWithTasksOn": true,
+    "taskRowsRenderedAfterScroll": 1,
+    "taskCountText": "1",
+    "serverContract": "includeTasks=0 returns tasks: []; includeTasks=1 returns the conversation tasks; default remains 1"
+  },
+  "note": "The web UI keeps the previous task snapshot only while the active conversation is unchanged; switching conversations while the panel is offscreen yields an empty task list until the panel is visible and a sync with includeTasks=1 runs. This avoids showing another conversation's tasks.",
+  "tests": "node --test: 177/177 passed in the isolated spec run (80.6 s); one earlier parallel run showed a single timing-sensitive failure that did not reproduce",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "f2d0be3e3bc76cce17ef53a3550f9ff126c97b0429def3f3edf5912be0ee9e46",
+    "build": "node --check on 18 modules (including public/app.js): exit 0",
+    "targetedTests": "21/21 passed (31.5 s)",
+    "managedRevision": "b688f9b3191bebda94628b69235f5d52e55057c5601c6e0d6421d90175fa0c5d-cb8e3c360766",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "public/app.js",
+      "sentinel.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately",
+      "browser behavior was verified manually in headless Chromium; the node suite does not execute public/app.js."
+    ]
+  }
+}

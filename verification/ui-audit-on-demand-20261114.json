@@ -1,0 +1,43 @@
+{
+  "feature": "on-demand audit rows in admin state polls",
+  "date": "2026-11-14",
+  "method": "headless managed Chromium, real server and admin token; page fetched state while the audit panel was below the fold, then scrolled to it after creating an audit entry",
+  "results": {
+    "auditPanelTopPx": 1680.97,
+    "viewportHeightPx": 600,
+    "requestsBeforeScrollWithAuditOff": true,
+    "requestsBeforeScrollWithAuditOn": false,
+    "requestsAfterScrollWithAuditOn": true,
+    "auditRowsRenderedAfterScroll": 1,
+    "serverContract": "includeAudit=0 returns audit: []; includeAudit=1 returns the latest 200; default remains 1 for existing clients"
+  },
+  "note": "The web UI keeps the last audit snapshot while the panel is offscreen (merged into the state) and requests audit rows again as soon as the panel intersects the viewport (200px root margin). The native client is unchanged and still receives audit by default.",
+  "tests": "node --test: 177/177 passed (81.7 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "d4f6a2398f16992f0870fc2f9b040b6341fe79ddfd7b146cddf4e882cd398707",
+    "build": "node --check on 18 modules (including public/app.js): exit 0",
+    "targetedTests": "21/21 passed (31.8 s; the audit pattern also selects other audit/health tests)",
+    "managedRevision": "4edb4dc4615bb9ecb4a9631ca6f3aa197d6686a297d53aa8994bf2489dac8eb5-d3094ad037bd",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "public/app.js",
+      "sentinel.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately",
+      "browser audit-visibility behavior was verified manually in headless Chromium; the node suite does not execute public/app.js."
+    ]
+  }
+}

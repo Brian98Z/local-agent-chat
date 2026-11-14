@@ -49,13 +49,21 @@
 | `agents` | 全局 UUID、唯一规范化名称、唯一 tokenHash、自报且固定的模型标识、审批状态 |
 | `conversations` | 正整数 id、标题、创建时间；保留初始对话 id=1；首条管理员消息/任务可在默认标题上自动生成标题 |
 | `conversation_state` | 单行 id=1，持久化 activeConversationId |
-| `messages` | 全局递增 id、conversationId、发送者、可空接收者、文本和时间 |
+| `messages` | 全局递增 id、conversationId、发送者、可空接收者、文本和时间；`clientPayload` 仅存幂等摘要 `sha256:<hex>`（旧行可能是完整 JSON，重试匹配后改写），页读取不选该列；库内无附件时消息页跳过附件查询（上传后置位） |
 | `tasks` | conversationId、状态与所有权；禁言/撤销释放覆盖所有对话 |
-| `audit` | 全局审计，不按当前对话裁剪，仅状态快照返回最近 200 条 |
+| `audit` | 全局审计，不按当前对话裁剪，仅状态快照返回最近 200 条；快照按 audit 写入失效的内存缓存返回 |
 | `settings` | 持久化管理员开关（当前为 `registrationOpen`）；重启恢复 |
 | `service-lock.sqlite` | 独立 SQLite 独占事务持有 OS 锁；崩溃释放锁，不靠删文件 |
 
-当前迁移在 `server.mjs` 初始化事务中创建缺失基础表，以 `PRAGMA table_info` 为旧表补充 `conversationId`、成员 `model`、消息 `toAdmin`、`replyTo`、`clientMessageId`、`clientPayload` 和 `kind`，创建附件表与索引后提交。`scoring.mjs` 初始化审计表。没有独立 schema version 计数器；`messages/tasks.conversationId` 由应用层检查关联。旧服务不能安全读取包含 `toAdmin` 私信的新库，不得直接降级。
+聊天库连接设置 `PRAGMA cache_size = -32768`（32 MiB）以降低大库上对话列表的页抖动；不改变 WAL、`synchronous=FULL` 或磁盘格式。当前迁移在 `server.mjs` 初始化事务中创建缺失基础表，以 `PRAGMA table_info` 为旧表补充 `conversationId`、成员 `model`、消息 `toAdmin`、`replyTo`、`clientMessageId`、`clientPayload` 和 `kind`，创建附件表与索引后提交。`scoring.mjs` 初始化审计表。没有独立 schema version 计数器；`messages/tasks.conversationId` 由应用层检查关联。旧服务不能安全读取包含 `toAdmin` 私信的新库，不得直接降级。
+
+进程内读缓存均由写路径清空：conversations 列表（及 id 映射）在消息插入/删除、对话创建/改名/删除、置顶变更时清空；tasks 列表在任务创建/动作/指派/删除、成员状态变更释放任务、对话删除时清空；agents 基础行与 @ 匹配器在成员加入、状态、头像、模型变化时清空；头像字节在 `setAvatar` 时删除；对话存在性集合在创建/删除时更新；置顶消息缓存按 `(conversationId,pinnedId,messageRevision)` 命中。
+
+认证按 tokenHash 缓存 actor，等待中的每秒复查按 agent id 使用同一 roster 失效点缓存；每次请求仍验证 Bearer 格式并做管理员 constant-time 比较，状态/加入/头像/模型变化会清空这两个缓存。缓存不改变权限判断。
+
+成员 @ 解析按 `rosterRevision` 缓存一个合并正则与名称映射；新增成员或改变状态时必须递增 `rosterRevision`，否则提及列表会过期。
+
+成员消息可见性依赖三个索引：`messages_conversation_to(conversationId,"to",id)`、`messages_conversation_from(conversationId,"from",id)` 与部分索引 `messages_conversation_broadcast(conversationId,id) WHERE "to" IS NULL AND toAdmin = 0`。成员翻页是三条分支的 `UNION`（去重自己发送的广播/自收私信），`earliest_available_id` 取三条 `LIMIT 1` 的最小值；按 (身份, 对话) 全局缓存，消息插入时清空、删除/编辑时随 `messageRevision` 重算；不要退回单条 `OR` 谓词，否则可见消息稀少的成员每次轮询都会扫描对话尾部。
 
 后续 schema 修改必须：
 - 在副本和空库都验证，启动两次确认幂等；异常不能留下半迁移。
@@ -65,25 +73,26 @@
 
 ## 4. 跨客户端一致性
 
-**当前对话是服务级状态，不是客户端私有选择。** 人工切换会影响所有客户端；历史可读但不是独立授权房间，仍遵循原有定向消息可见性。
+**当前对话是服务级状态，不是客户端私有选择。** 人工切换会影响所有客户端；历史可读但不是独立授权房间，仍遵循原有定向消息可见性。活动对话 id 在服务进程内缓存，只在创建/激活/删除事务提交后更新。
 
 - 消息 id 全局单调，但游标必须按 conversationId 分开保存。切回历史不能沿用另一个对话的游标。
 - UI 先取状态快照再按显式 conversationId 分页；切换时清理旧消息控件、游标及可访问文本，恢复该对话草稿。
 - 写操作捕获点击/接收指令时的对话 ID，服务在读完请求体后重新鉴权并检查当前对话，冲突返回409；不要自动改投新对话。
-- 头像以 `GET /api/avatars/:id` 读取，列表仅带 `avatarHash`；原生按 hash 缓存并仅在变化时抓取，浏览器用 blob URL 并在断连时释放。头像校验与安全子集见 CONTRACT/MCP；原生渲染只支持文档子集，额外元素会被跳过或回退首字。
-- 原生/浏览器轮询约2秒；`chat_wait` 是 MCP 客户端长等待，不是窗口刷新机制。轮询使用 `GET /api/admin/state` 的 `latestMessageId` 判断是否需要再取消息：原生窗口首次加载取完整状态（200 条消息），之后带 `includeMessages=0` 只取变更提示；浏览器始终使用轻量状态。客户端游标已追平 `latestMessageId` 时不得再发 `/api/messages`。成员卡按内容签名跳过未变化的重排，顶栏文本按值更新。原生非聚焦/最小化时新消息累计到窗口标题并闪烁任务栏，激活清零；浏览器隐藏标签页累计到 document.title，可见时清零。初次加载、历史分页、搜索定位与返回最新不计入提醒。静态资源使用 `Cache-Control: no-store` 并对 index 引用加版本查询，避免旧 JS 缓存。
+- 头像以 `GET /api/avatars/:id` 读取，列表仅带 `avatarHash`；响应带 `ETag=avatarHash`，条件请求返回 304；原生按 hash 缓存并仅在变化时抓取，浏览器用 blob URL 并在断连时释放。头像校验与安全子集见 CONTRACT/MCP；原生渲染只支持文档子集，额外元素会被跳过或回退首字。
+- 原生/浏览器轮询约2秒；`chat_wait` 是 MCP 客户端长等待，不是窗口刷新机制。轮询使用 `GET /api/admin/state` 的 `latestMessageId` 判断是否需要再取消息：原生窗口首次加载取完整状态（200 条消息），之后带 `includeMessages=0` 只取变更提示；浏览器始终使用轻量状态。客户端游标已追平 `latestMessageId` 时不得再发 `/api/messages`。成员卡按内容签名跳过未变化的重排，顶栏文本按值更新。原生非聚焦/最小化时新消息累计到窗口标题并闪烁任务栏，激活清零；浏览器隐藏标签页累计到 document.title，可见时清零；隐藏期间状态轮询降为 5 s、跳过界面渲染与消息正文拉取（外部切换对话时不按旧游标计未读），可见时立即同步并补齐。初次加载、历史分页、搜索定位与返回最新不计入提醒。浏览器管理台的消息卡只在新建时写入发送者/收件人/回复/已编辑字段，并批量 append；为搜索发送者、审计列表、任务列表与成员卡维护渲染签名，状态未变时跳过重建；成员卡签名含名称、模型、状态、头像哈希、在线/活动文本；`renderState()` 只在面板可见时渲染任务/审计；管理台用 IntersectionObserver 检测审计与任务面板，离屏时状态轮询带 `includeAudit=0`/`includeTasks=0` 并保留上一份快照（任务仅在对话未切换时保留），进入视口后立即带对应 `=1` 同步；切换对话或断开时清除相应签名。`index.html` 使用 `Cache-Control: no-store`；`app.js`/`style.css` 使用 `no-cache` + 基于 mtime/size 的 ETag，命中 `If-None-Match` 返回 304。服务端按 mtime/size 做内存缓存，编辑 public 文件后下一次请求自动重读。
 - 导出对话在客户端分页读取 `/api/messages`，不新增服务端接口；超过 20000 条截断并注明，附件仅导出名称/大小。
 - 置顶存于 conversations.pinnedMessageId，每对话最多一条；置顶变更写审计并通过状态轮询反映，删除置顶消息自动清空。
 - 删除或编辑消息后 `/api/admin/state.messageRevision` 递增；编辑保留 `editedAt` 供界面显示“已编辑”，空白正文仅在该消息已有附件时允许。客户端检测变化后清空当前消息视图并从最新状态重载，避免残留已删除行。成员 MCP 游标不回退，删除不补发。
 - 搜索定位会载入以目标消息结尾的页面并进入历史浏览模式；返回最新按全局游标重新取最后一页。搜索仅按当前身份可见范围查询，管理员可见全部，成员/禁言成员只匹配其可见消息。
 - 对话未读由客户端比较各对话 `latestMessageId` 与本地已读基线得出；首次状态以最新消息为基线，切换对话即清零，重启后重新建立基线，不持久化已读状态。
-- 服务端写入后的长等待唤醒经 `setImmediate` 延迟并合并，写入响应不等待全部等待者查询；突发广播在同一 tick 内只 fan-out 一次。
-- 哨兵 `worker.mjs` 以本成员令牌直接 HTTP 读取名册/对话/消息（缺身份文件时回退 `mcp.mjs` CLI），每次回复省去约 3 次 180 ms 子进程启动；回复发送仍走桥以保持权限与幂等语义。
+- 服务端写入后的长等待唤醒经 `setImmediate` 延迟并合并，写入响应不等待全部等待者查询；fan-out 每批 8 个等待者、批间让出事件循环（34 个等待者时同步遍历会阻塞约 19–20 ms）；fan-out 期间的新写入置 `wakeAgain`，本轮结束后再补一轮，避免漏唤醒。
+- 哨兵 `worker.mjs` 以本成员令牌直接 HTTP 读取名册/对话/消息（缺身份文件时回退 `mcp.mjs` CLI），名册与对话列表并行请求，每次回复省去约 3 次 180 ms 子进程启动；回复发送仍走桥以保持权限与幂等语义。`sentinel.mjs` 启动时检查一次 `toAdmin` 列并缓存广播/定向两条历史查询语句。
+- `worker.mjs` 在遍历对话、分页读取广播时累计提示词字符下界（每条 `min(正文长度,1200)+1`），达到 `--max-chars` 后不再请求后续对话/页；格式化阶段本来就在同一位置截断，因此注入文本逐字节不变。历史对话很多时避免每次回复都请求全部对话。 读取终点同时使用对话列表的 `latestMessageId`（成员可见的最新 id）：`cursor >= latestMessageId` 即停止，避免为确认“没有更多”多请求一页；`latestMessageId === 0` 的对话直接视为 0 条、不发起读取；字段缺失时退回逐页判断。该值是列表快照，之后到达的消息不保证进入本次提示词。
 - 草稿只在窗口内存中保存，客户端游标/执行完成记录也未由服务替客户端持久化。不要承诺端到端恰好一次执行。
 
 ## 5. 长等待与生命周期
 
-服务 `/api/events` 使用等待回调集合，在消息提交、对话激活/创建、成员状态变化后唤醒；每秒复查权限（active 或 paused 允许继续，撤销/未批准结束等待），最长25秒。不可见定向消息不返回消息或推进游标。连接取消和服务关闭清理等待器。
+服务 `/api/events` 使用等待回调集合，在消息提交、对话激活/创建、成员状态变化后唤醒；唤醒按 8 个一批执行，批间 `setImmediate`；所有读取共用 `earliest_available_id` 缓存（插入时清空，删除/编辑递增 revision 重算）；每秒复查权限（按 actor id 查状态；active 或 paused 允许继续，撤销/未批准结束等待；请求开始时的令牌校验不变），最长25秒。不可见定向消息不返回消息或推进游标。连接取消和服务关闭清理等待器。
 
 MCP `chat_wait` 对传输错误、响应不完整和事件接口503最多重连2次，间隔500/1500毫秒，总期限35秒；401/403等业务错误不重试，POST从不自动重发。返回后模型客户端需要再次调用。当前 stdio 桥顺序处理请求：长等待期间同一桥上的后续调用排队；没有 MCP 取消通知处理、订阅推送、自动客户端重启或模型看门狗。不要把这些描述成已经实现。
 
@@ -105,7 +114,7 @@ MCP `chat_wait` 对传输错误、响应不完整和事件接口503最多重连2
 | UI布局/文字 | 实际窗口可视验证、DPI/最小尺寸/按钮文字/禁用态、AutomationId、无凭据截图 |
 | 进程启动/停止 | Launcher、host、服务关闭、正常关窗与强制退出后的端口/锁释放 |
 | 数据迁移 | 空库、旧库、重复启动、备份与恢复、历史/审批不丢失 |
-| 语言 | 原生文案、审计/错误映射、CurrentUICulture、MCP显示语言说明；不翻译原始消息 |
+| 语言 | 原生文案、审计/错误映射、CurrentUICulture、MCP显示语言说明；MCP initialize 的显示语言按用户缓存，1 小时后后台刷新、24 小时后重查；不翻译原始消息 |
 
 ## 7. 构建与验证步骤
 

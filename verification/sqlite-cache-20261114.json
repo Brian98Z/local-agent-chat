@@ -1,0 +1,69 @@
+{
+  "feature": "SQLite connection page cache",
+  "date": "2026-11-14",
+  "method": "500 conversations and 200,000 messages in a 28 MB database with the production indexes; warmed 100-iteration timings per setting",
+  "results": {
+    "default": {
+      "adminConversationListMs": 4.686,
+      "memberConversationListMs": 4.841,
+      "pageMs": 0.516,
+      "searchMs": 0.055
+    },
+    "cache16MiB": {
+      "adminConversationListMs": 0.957,
+      "memberConversationListMs": 0.902
+    },
+    "cache32MiB": {
+      "adminConversationListMs": 0.758,
+      "memberConversationListMs": 0.919,
+      "pageMs": 0.489,
+      "searchMs": 0.052
+    },
+    "cache64MiB": {
+      "adminConversationListMs": 0.772,
+      "memberConversationListMs": 0.928
+    },
+    "mmap64MiB": {
+      "adminConversationListMs": 0.798,
+      "memberConversationListMs": 0.967
+    },
+    "mmap256MiB": {
+      "adminConversationListMs": 0.777,
+      "memberConversationListMs": 0.908
+    },
+    "tempStoreMemoryWithCache32": {
+      "adminConversationListMs": 0.995,
+      "searchMs": 0.064
+    }
+  },
+  "chosen": "PRAGMA cache_size = -32768 (32 MiB)",
+  "note": "32 MiB page cache gives ~6x on conversation-list queries at this scale; mmap gives a similar result but maps the file into RSS, and temp_store=MEMORY was slightly worse. Small databases only cache pages they touch, so the ceiling does not imply 32 MiB RSS on day one.",
+  "tests": "node --test: 177/177 passed (81.6 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "41fc083ad057bee18f6e62dd2948613b3233a6c28ec6d708e761c6f4d9b7e785",
+    "build": "node --check on 18 modules (including public/app.js): exit 0",
+    "targetedTests": "21/21 passed (33.0 s; audit pattern selects audit/health cases)",
+    "managedRevision": "ebd75d90176b8a0e0c5de2ffec2d3e6b634ce955121ed8d989730fbd1c69f204-3dc795c365a4",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "public/app.js",
+      "sentinel.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside an sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately",
+      "browser behavior was verified manually in headless Chromium; the node suite does not execute public/app.js."
+    ]
+  }
+}

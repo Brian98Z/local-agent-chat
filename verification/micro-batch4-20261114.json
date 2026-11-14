@@ -1,0 +1,96 @@
+{
+  "feature": "fourth ten-round micro-optimization batch",
+  "date": "2026-11-14",
+  "method": "function-level microbenchmarks plus existing integration suite; caches are cleared by the roster/conversation/task invalidation points and never replace token verification",
+  "rounds": [
+    {
+      "round": 31,
+      "area": "authentication",
+      "change": "actor cached by token hash; cleared on join/status/avatar/model changes",
+      "measure": "3.39 → 0.40 µs per authenticated request (token hashing still runs)"
+    },
+    {
+      "round": 32,
+      "area": "waiter recheck",
+      "change": "per-second status recheck uses cached agents-by-id rows",
+      "measure": "3.14 → 0.01 µs per second per waiter"
+    },
+    {
+      "round": 33,
+      "area": "pinned message",
+      "change": "state pinned lookup cached by (conversationId,pinnedId,messageRevision)",
+      "measure": "~1.9 µs per state poll with a pinned message"
+    },
+    {
+      "round": 34,
+      "area": "health counts",
+      "change": "five COUNT queries replaced by one combined SELECT",
+      "measure": "30.75 → 5.66 µs per health request"
+    },
+    {
+      "round": 35,
+      "area": "MCP bridge",
+      "change": "tool definitions looked up in a Map instead of a linear find",
+      "measure": "0.17 → 0.01 µs per tool call"
+    },
+    {
+      "round": 36,
+      "area": "avatars",
+      "change": "ETag from avatarHash; conditional request returns 304",
+      "measure": "0 body bytes on revalidation; cached bytes still served"
+    },
+    {
+      "round": 37,
+      "area": "admin state",
+      "change": "conversation-by-id Map built with the list cache, avoiding a 500-row find",
+      "measure": "0.36 → 0.01 µs per state poll at 500 conversations"
+    },
+    {
+      "round": 38,
+      "area": "JSON responses",
+      "change": "shared header object instead of a per-response literal",
+      "measure": "below microbenchmark resolution; removes one allocation per JSON response"
+    },
+    {
+      "round": 39,
+      "area": "integer parsing",
+      "change": "manual digit loop instead of regex",
+      "measure": "0.03 → 0.02 µs per value"
+    },
+    {
+      "round": 40,
+      "area": "re-join",
+      "change": "existing join response reuses the fetched row and setAvatar hash instead of re-querying",
+      "measure": "removes a 3.14 µs row query on every re-join"
+    }
+  ],
+  "note": "Rounds 31 and 32 are request/wait-level wins; 33–37 and 40 are small but reproducible. Authentication still verifies the token on every request; caches store actor rows, never raw tokens, and are cleared by the same roster invalidation as the agent/matcher caches.",
+  "tests": "node --test: 176/176 passed (80.9 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "8fb29d20bb34212a2a56b62462dee10c3d39bb285be4edee0414a13d25009538",
+    "build": "node --check on 17 modules: exit 0",
+    "targetedTests": "17/17 passed (30.9 s, includes sentinel, visibility, legacy payload, earliest-id, wake and static ETag tests)",
+    "managedRevision": "01171f00dd95b90b723ef256e54c78587dc7f753d4ef0134d7bbe90d2c5cc3ec-079283252ff5",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "sentinel.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately",
+      "the project-commit CLI has a 1 MiB input JSON limit; this cumulative candidate exceeds it, so commit was invoked through the extracted application_project source"
+    ],
+    "note": "cumulative candidate contains all 2026-11-14 changes, including the four ten-round batches"
+  }
+}

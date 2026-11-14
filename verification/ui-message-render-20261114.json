@@ -1,0 +1,49 @@
+{
+  "feature": "web admin message-card render batching",
+  "date": "2026-11-14",
+  "method": "headless managed Chromium; 34 synthetic agents and 200 messages; 20 subsequent single-message renders; timings via performance.now()",
+  "before": {
+    "batch200Ms": 52.4,
+    "singleWith200CardsAvgMs": 2.42,
+    "singleP50Ms": 2.4
+  },
+  "after": {
+    "batch200Ms": 45.3,
+    "singleWith200CardsAvgMs": 1.005,
+    "singleP50Ms": 1.0
+  },
+  "changes": [
+    "update sender/recipient/reply/edited fields only on newly created cards",
+    "build an agent id→name map once per render instead of scanning state.agents per message",
+    "append all new cards in one DOM mutation"
+  ],
+  "note": "Existing cards are immutable for these fields: edits/deletes bump messageRevision and force a full reload. Agent renaming is not supported. Initial 200-card paint remains ~45 ms in headless Chromium.",
+  "tests": "node --test: 177/177 passed (82.9 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "25fc692413d24a82ea93270759335e3c5aa8319312a75920cfe22fb5c751a895",
+    "build": "node --check on 18 modules (including public/app.js): exit 0",
+    "targetedTests": "21/21 passed (32.0 s)",
+    "managedRevision": "13a51e969dd47add042f13049f5de7c8560326771e138bb28202e42da74d6499-95d61d1761f7",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "public/app.js",
+      "sentinel.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately",
+      "browser behavior was verified manually in headless Chromium; the node suite does not execute public/app.js."
+    ]
+  }
+}

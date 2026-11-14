@@ -1,0 +1,96 @@
+{
+  "feature": "batched long-poll wake fan-out",
+  "date": "2026-11-14",
+  "method": "34 approved members hold /api/events (timeout 25s) while one administrator broadcast is sent; 60 concurrent /api/agents requests run in a separate process from 3 ms before to after the broadcast. Server variants differ only in wakeEventWaiters: one synchronous pass over every waiter vs batches of 8 with setImmediate between batches.",
+  "dataset": "fresh isolated data dir, one conversation, 34 members, Node 22.19.0, three runs per variant",
+  "runs": {
+    "singlePass": [
+      {
+        "pollP50Ms": 2.57,
+        "pollP95Ms": 4.24,
+        "pollMaxMs": 18.74,
+        "delivered": 34
+      },
+      {
+        "pollP50Ms": 2.37,
+        "pollP95Ms": 3.63,
+        "pollMaxMs": 18.89,
+        "delivered": 34
+      },
+      {
+        "pollP50Ms": 2.38,
+        "pollP95Ms": 4.08,
+        "pollMaxMs": 20.42,
+        "delivered": 34
+      }
+    ],
+    "batched": [
+      {
+        "pollP50Ms": 2.38,
+        "pollP95Ms": 3.4,
+        "pollMaxMs": 5.08,
+        "delivered": 34
+      },
+      {
+        "pollP50Ms": 2.46,
+        "pollP95Ms": 3.22,
+        "pollMaxMs": 6.97,
+        "delivered": 34
+      },
+      {
+        "pollP50Ms": 2.49,
+        "pollP95Ms": 3.51,
+        "pollMaxMs": 4.9,
+        "delivered": 34
+      }
+    ]
+  },
+  "medians": {
+    "pollP95Ms": {
+      "singlePass": 4.08,
+      "batched": 3.4
+    },
+    "pollMaxMs": {
+      "singlePass": 18.89,
+      "batched": 5.08
+    }
+  },
+  "senderIsolation": {
+    "note": "a separate process performed the POST; wall time includes ~45 ms Node process startup, so absolute values are not server latency",
+    "singlePassMs": [
+      46.69,
+      48.82,
+      46.05
+    ],
+    "batchedMs": [
+      48.0,
+      48.08,
+      47.19
+    ]
+  },
+  "note": "Every waiter received the broadcast in both variants. A write that lands during a batched pass sets wakeAgain and triggers another pass over the then-current waiters, so later messages are not missed; newly registered waiters cover the current state in their own first check().",
+  "tests": "node --test: 173/173 passed (82.5 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "c816ec8352177931b73434b6a612f2cc5c8685ea4b4ba8df0fffc3e84e48ee5a",
+    "build": "node --check on 17 modules: exit 0",
+    "targetedTests": "14/14 passed (31.0 s, includes 5 sentinel tests)",
+    "managedRevision": "dfbf3e9aa91d1086eded656af61101596915cb8d4f0692c0bffb015cddcc9c81-32a289a7f8f4",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately"
+    ],
+    "note": "cumulative candidate contains the 2026-11-14 visibility, worker budget/paging and wake fan-out changes"
+  }
+}

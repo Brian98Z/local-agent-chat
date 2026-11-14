@@ -61,7 +61,10 @@ let historyMode = false;
 let messageRevision = -1;
 const baseTitle = document.title;
 let attentionCount = 0;
+let hiddenLatest = 0;
 let suppressAttention = false;
+let auditVisible = false;
+let tasksVisible = false;
 
 function updateAttentionTitle() {
   const title = attentionCount > 0 ? `(${attentionCount}) ${baseTitle}` : baseTitle;
@@ -201,6 +204,7 @@ function switchConversation(id) {
     map.clear();
     $(list).replaceChildren();
   }
+  delete $('task-list').dataset.signature;
   $('message-scroll').scrollTop = 0;
   for (const count of ['message-count', 'task-count']) setText($(count), '0');
   for (const empty of ['messages-empty', 'tasks-empty']) {
@@ -395,6 +399,9 @@ function renderSearchSenders() {
   const entries = [{ id: '', name: '全部成员' }, { id: 'admin', name: '管理员' }];
   for (const agent of state?.agents ?? []) if (agent.status !== 'revoked') entries.push({ id: agent.id, name: agent.name });
   entries.sort((left, right) => left.id === '' ? -1 : right.id === '' ? 1 : left.name.localeCompare(right.name, 'zh-CN'));
+  const signature = JSON.stringify(entries);
+  if (select.dataset.signature === signature) return;
+  select.dataset.signature = signature;
   select.replaceChildren(...entries.map((entry) => {
     const option = node('option', '', entry.name);
     option.value = entry.id;
@@ -412,6 +419,9 @@ function renderAgents() {
   pruneCards(agentCards, members.map((agent) => agent.id));
   for (const agent of members) {
     let card = agentCards.get(agent.id);
+    const presence = memberPresence(agent);
+    const signature = JSON.stringify([agent.name, agent.model, agent.status, agent.avatarHash, presence.text, presence.kind, agent.activity?.detail ?? '']);
+    if (card && card.signature === signature && card.status === agent.status) continue;
     if (!card) {
       const root = node('li', 'member-card');
       root.dataset.agentId = agent.id;
@@ -451,10 +461,10 @@ function renderAgents() {
     setText(card.model, `模型 · ${agent.model || '未声明'}`);
     setText(card.badge, statusLabels[agent.status] ?? agent.status);
     card.badge.className = `badge ${agent.status}`;
-    const presence = memberPresence(agent);
     setText(card.activity, presence.text);
     card.activity.className = `member-activity ${presence.kind}`;
     card.activity.title = agent.activity?.detail || '';
+    card.signature = signature;
     if (card.status !== agent.status) {
       card.status = agent.status;
       card.actions.replaceChildren();
@@ -490,6 +500,9 @@ function renderMessages(messages) {
   const scroll = $('message-scroll');
   const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 70;
   const before = messageCards.size;
+  const agentById = new Map((state?.agents ?? []).map((agent) => [agent.id, agent]));
+  const nameOf = (id) => id === 'admin' ? '管理员' : agentById.get(id)?.name ?? id ?? '未认领';
+  const addedRoots = [];
   for (const message of messages) {
     if (message.conversationId !== activeConversationId) continue;
     if (messageCards.has(message.id)) continue;
@@ -550,18 +563,17 @@ function renderMessages(messages) {
       });
       root.append(download);
     }
-    $('message-list').append(root);
-    void applyAvatar(avatar, state?.agents.find((agent) => agent.id === message.from));
     messageCards.set(message.id, { root, sender, recipient, replyRef, editedMark, replyAction, editAction, pinAction, message });
+    setText(sender, nameOf(message.from));
+    setText(recipient, message.to ? `定向 → ${nameOf(message.to)}` : '广播 → 所有成员');
+    recipient.classList.toggle('direct', Boolean(message.to));
+    setText(replyRef, message.replyTo ? `回复 #${message.replyTo}` : '');
+    replyRef.hidden = !message.replyTo;
+    editedMark.hidden = !message.editedAt;
+    addedRoots.push(root);
+    void applyAvatar(avatar, agentById.get(message.from));
   }
-  for (const card of messageCards.values()) {
-    setText(card.sender, displayName(card.message.from));
-    setText(card.recipient, card.message.to ? `定向 → ${displayName(card.message.to)}` : '广播 → 所有成员');
-    card.recipient.classList.toggle('direct', Boolean(card.message.to));
-    setText(card.replyRef, card.message.replyTo ? `回复 #${card.message.replyTo}` : '');
-    card.replyRef.hidden = !card.message.replyTo;
-    card.editedMark.hidden = !card.message.editedAt;
-  }
+  if (addedRoots.length) $('message-list').append(...addedRoots);
   $('messages-empty').hidden = messageCards.size > 0;
   setText($('messages-empty'), '还没有消息。发送一条广播，开始协作。');
   setText($('message-count'), messageCards.size);
@@ -569,6 +581,7 @@ function renderMessages(messages) {
   const added = messageCards.size - before;
   if (added > 0 && document.hidden && ready && !historyMode && !suppressAttention) {
     attentionCount += added;
+    hiddenLatest = Math.max(hiddenLatest, ...messages.map((message) => message.id));
     updateAttentionTitle();
   }
 }
@@ -748,6 +761,10 @@ function returnToLatest() {
 }
 
 function renderTasks() {
+  const list = $('task-list');
+  const signature = JSON.stringify({ conversationId: activeConversationId, tasks: state.tasks.map((task) => [task.id, task.title, task.description, task.status, task.owner, task.note, task.updatedAt, task.createdBy]) });
+  if (list.dataset.signature === signature) return;
+  list.dataset.signature = signature;
   pruneCards(taskCards, state.tasks.map((task) => task.id));
   for (const task of state.tasks) {
     let card = taskCards.get(task.id);
@@ -830,6 +847,11 @@ function renderTasks() {
   setText($('tasks-empty'), '还没有共享任务。创建任务后，管理员或已批准的智能体可以认领。');
 }
 function renderAudit() {
+  const list = $('audit-list');
+  const filter = ($('audit-filter')?.value ?? '').trim();
+  const signature = filter + '|' + JSON.stringify((state?.audit ?? []).map((entry) => [entry.id, entry.actor, entry.action, entry.target, entry.createdAt]));
+  if (list.dataset.signature === signature) return;
+  list.dataset.signature = signature;
   const entries = filteredAuditEntries();
   pruneCards(auditCards, entries.map((entry) => entry.id));
   let previous = null;
@@ -860,12 +882,13 @@ function renderState() {
   renderSearchSenders();
   renderAgents();
   renderRecipients();
-  renderTasks();
-  renderAudit();
+  // Offscreen panels are synced when they enter the viewport; skip their render work until then.
+  if (tasksVisible) renderTasks();
+  if (auditVisible) renderAudit();
 }
 function scheduleSync() {
   clearTimeout(timer);
-  if (token) timer = setTimeout(() => { void sync(); }, 2000);
+  if (token) timer = setTimeout(() => { void sync(); }, document.hidden ? 5000 : 2000);
 }
 function handleFailure(error) {
   setChatLoading(false);
@@ -885,8 +908,13 @@ async function sync() {
   const current = generation;
   const work = (async () => {
     try {
-      const next = await api('/api/admin/state?includeMessages=0');
+      const previousState = state;
+      const next = await api(`/api/admin/state?includeMessages=0&includeAudit=${auditVisible ? 1 : 0}&includeTasks=${tasksVisible ? 1 : 0}`);
       if (current !== generation) return;
+      // The audit panel can be far below the fold; keep its last snapshot while polling without it.
+      if (!auditVisible && next.audit.length === 0 && state?.audit?.length) next.audit = state.audit;
+      // Tasks are per conversation: retain the last snapshot only within the same conversation.
+      if (!tasksVisible && next.tasks.length === 0 && previousState?.tasks?.length && previousState.activeConversationId === next.activeConversationId) next.tasks = previousState.tasks;
       state = next;
       const revision = Number(next.messageRevision ?? 0);
       const revisionReload = messageRevision >= 0 && revision !== messageRevision;
@@ -900,15 +928,27 @@ async function sync() {
       }
       messageRevision = revision;
       updateConversationUnread(next);
-      switchConversation(next.activeConversationId);
-      renderState();
+      const hidden = document.hidden;
+      if (!hidden) {
+        switchConversation(next.activeConversationId);
+        renderState();
+      }
       // Pin every history page to the same conversation, even if another client switches it.
       const conversationId = activeConversationId;
       const latest = Number(next.latestMessageId ?? 0);
-      if (!historyMode && cursor === 0 && latest > 200) cursor = latest - 200;
+      if (!hidden && !historyMode && cursor === 0 && latest > 200) cursor = latest - 200;
       if (revisionReload) suppressAttention = true;
       try {
-        if (!historyMode && latest > cursor) {
+        if (hidden && !historyMode) {
+          if (next.activeConversationId === activeConversationId) {
+            if (ready && !suppressAttention && latest > Math.max(cursor, hiddenLatest)) {
+              attentionCount += latest - Math.max(cursor, hiddenLatest);
+              updateAttentionTitle();
+            }
+          }
+          hiddenLatest = Math.max(hiddenLatest, latest);
+        }
+        if (!hidden && !historyMode && latest > cursor) {
           for (let page = 0; page < 10; page += 1) {
             const batch = await api(`/api/messages?conversationId=${conversationId}&after=${cursor}&limit=200`);
             if (current !== generation || activeConversationId !== conversationId) return;
@@ -918,7 +958,8 @@ async function sync() {
             if (batch.messages.length < 200) break;
           }
         }
-        if (!historyMode && messageCards.size === 0) renderMessages([]);
+        if (!hidden && !historyMode && messageCards.size === 0) renderMessages([]);
+        if (!hidden) hiddenLatest = cursor;
       } finally {
         if (revisionReload) suppressAttention = false;
       }
@@ -989,6 +1030,7 @@ function disconnect() {
   $('health-output').hidden = true;
   $('health-output').textContent = '';
   attentionCount = 0;
+  hiddenLatest = 0;
   updateAttentionTitle();
   $('member-filter').value = '';
   hideRenameRow();
@@ -1011,6 +1053,8 @@ function disconnect() {
   setText($('conversation-title'), '尚未连接');
   $('admin-token').value = '';
   for (const [map, list] of [[agentCards, 'agent-list'], [taskCards, 'task-list'], [messageCards, 'message-list'], [auditCards, 'audit-list']]) { map.clear(); $(list).replaceChildren(); }
+  delete $('task-list').dataset.signature;
+  delete $('audit-list').dataset.signature;
   for (const id of ['agent-count', 'message-count', 'task-count']) setText($(id), '0');
   for (const id of ['agents-empty', 'messages-empty', 'tasks-empty', 'audit-empty']) { $(id).hidden = false; setText($(id), '尚未连接。连接后加载数据。'); }
   setText($('registration-status'), '登记状态未知');
@@ -1045,7 +1089,10 @@ $('search-button').addEventListener('click', () => { void searchMessages(); });
 $('message-search').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); void searchMessages(); } });
 $('return-latest').addEventListener('click', returnToLatest);
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { attentionCount = 0; updateAttentionTitle(); }
+  if (document.hidden) { hiddenLatest = Math.max(hiddenLatest, cursor); return; }
+  attentionCount = 0;
+  updateAttentionTitle();
+  if (token) void sync();
 });
 $('member-filter').addEventListener('input', () => { if (state) renderAgents(); });
 $('audit-filter').addEventListener('input', () => { if (state) renderAudit(); });
@@ -1141,4 +1188,33 @@ $('task-form').addEventListener('submit', (event) => {
     if ($('task-description').value === description) $('task-description').value = '';
   });
 });
+if (typeof IntersectionObserver === 'function') {
+  const tasksPanel = document.querySelector('.tasks-panel');
+  if (tasksPanel) {
+    const tasksObserver = new IntersectionObserver((entries) => {
+      const visible = entries.some((entry) => entry.isIntersecting);
+      if (visible === tasksVisible) return;
+      tasksVisible = visible;
+      if (visible && token) void sync();
+    }, { rootMargin: '200px 0px' });
+    tasksObserver.observe(tasksPanel);
+  } else {
+    tasksVisible = true;
+  }
+  const auditPanel = document.querySelector('.audit-panel');
+  if (auditPanel) {
+    const auditObserver = new IntersectionObserver((entries) => {
+      const visible = entries.some((entry) => entry.isIntersecting);
+      if (visible === auditVisible) return;
+      auditVisible = visible;
+      if (visible && token) void sync();
+    }, { rootMargin: '200px 0px' });
+    auditObserver.observe(auditPanel);
+  } else {
+    auditVisible = true;
+  }
+} else {
+  auditVisible = true;
+  tasksVisible = true;
+}
 window.addEventListener('pagehide', disconnect);

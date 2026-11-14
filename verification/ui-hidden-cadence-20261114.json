@@ -1,0 +1,43 @@
+{
+  "feature": "hidden-tab poll cadence and render skip",
+  "date": "2026-11-14",
+  "method": "headless managed Chromium with a real server and admin token; page visibility overridden for the test; requests counted through CDP",
+  "results": {
+    "visibleStatePollsIn10s": 4,
+    "hiddenStatePollsIn11s": 3,
+    "hiddenStateIntervalMs": 5000,
+    "hiddenMessageFetches": 0,
+    "hiddenTitleAfterNewMessage": "(1) 本地协作室 · 管理台",
+    "messageFetchesAfterReturningVisible": 1,
+    "messageCardsAfterReturningVisible": 1
+  },
+  "note": "While hidden the page polls state every 5 s instead of 2 s, skips switchConversation/renderState and message body fetches, and updates the unread title from latestMessageId deltas. Returning visible resets attention, syncs immediately and renders the updated state.",
+  "tests": "node --test: 177/177 passed (80.3 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "81d54215150e9ee1e901c5a9b645f89598c9c291c42482934f7786591d6d87a8",
+    "build": "node --check on 18 modules (including public/app.js): exit 0",
+    "targetedTests": "21/21 passed (33.2 s)",
+    "managedRevision": "e9fc615c3518e50efe548d121f15a3e44810accb6d626408ba9f78f2b228dde7-122ad7ee7e1e",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "public/app.js",
+      "sentinel.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately",
+      "browser behavior was verified manually in headless Chromium; the node suite does not execute public/app.js."
+    ]
+  }
+}

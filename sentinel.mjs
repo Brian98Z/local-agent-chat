@@ -241,11 +241,17 @@ function agents() {
   return activeAgentsQuery.all();
 }
 
+// Schema checks and statement preparation happen once, not for every dispatched message.
+const historyHasToAdmin = db.prepare('PRAGMA table_info(messages)').all().some(column => column.name === 'toAdmin');
+const historyBroadcast = historyHasToAdmin ? '(m."to" IS NULL AND m.toAdmin = 0)' : 'm."to" IS NULL';
+const historySelect = 'SELECT m.id,COALESCE(a.name, m."from") AS sender,m.text FROM messages m LEFT JOIN agents a ON a.id = m."from" WHERE m.conversationId = ? AND m.id <= ?';
+const historyStatements = {
+  broadcast: db.prepare(`${historySelect} AND ${historyBroadcast} ORDER BY m.id DESC LIMIT 10`),
+  direct: db.prepare(`${historySelect} AND (${historyBroadcast} OR m."to" = ? OR m."from" = ?) ORDER BY m.id DESC LIMIT 10`),
+};
+
 function historyFor(conversationId, upToId, agentId, direct) {
-  const hasToAdmin = db.prepare('PRAGMA table_info(messages)').all().some(column => column.name === 'toAdmin');
-  const broadcast = hasToAdmin ? '(m."to" IS NULL AND m.toAdmin = 0)' : 'm."to" IS NULL';
-  const visibility = direct ? `(${broadcast} OR m."to" = ? OR m."from" = ?)` : broadcast;
-  return db.prepare(`SELECT m.id,COALESCE(a.name, m."from") AS sender,m.text FROM messages m LEFT JOIN agents a ON a.id = m."from" WHERE m.conversationId = ? AND m.id <= ? AND ${visibility} ORDER BY m.id DESC LIMIT 10`)
+  return historyStatements[direct ? 'direct' : 'broadcast']
     .all(...(direct ? [conversationId, upToId, agentId, agentId] : [conversationId, upToId]))
     .reverse()
     .map((row) => ({
@@ -255,12 +261,20 @@ function historyFor(conversationId, upToId, agentId, direct) {
     }));
 }
 
+const mentionPatterns = new Map();
+function mentionPattern(name) {
+  let pattern = mentionPatterns.get(name);
+  if (!pattern) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    pattern = new RegExp(`@${escaped}(?![\\p{L}\\p{N}_])`, 'iu');
+    mentionPatterns.set(name, pattern);
+  }
+  return pattern;
+}
+
 function mentionedAgents(message, active) {
   const text = String(message.text || '');
-  return active.filter((agent) => {
-    const escaped = agent.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`@${escaped}(?![\\p{L}\\p{N}_])`, 'iu').test(text);
-  });
+  return active.filter((agent) => mentionPattern(agent.name).test(text));
 }
 
 function route(message, active) {

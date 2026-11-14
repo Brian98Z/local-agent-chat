@@ -1,0 +1,52 @@
+{
+  "feature": "web admin render signatures",
+  "date": "2026-11-14",
+  "method": "headless managed Chromium; page-global render functions called with synthetic state; timings via performance.now(); screenshot used only for visual confirmation and not committed",
+  "results": {
+    "searchSender": {
+      "noRebuildWhenUnchanged": true,
+      "rebuildsWhenAgentChanges": true,
+      "selectionPreserved": true
+    },
+    "audit200": {
+      "firstRenderMs": 20.4,
+      "secondRenderMs": 0.1,
+      "noRebuildWhenUnchanged": true
+    },
+    "tasks50": {
+      "firstRenderMs": 6.8,
+      "secondRenderMs": 0,
+      "noRebuildWhenUnchanged": true
+    },
+    "setTextKeepsTextNode": true
+  },
+  "note": "Signatures live in the list dataset. Switching conversations clears the task signature; disconnecting clears task and audit signatures; the audit signature includes the filter input value so filtering still redraws immediately. Search-sender options rebuild only when the id/name list changes.",
+  "tests": "node --test: 176/176 passed (81.0 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "e2e398f2b43ba561526a4d51e203638c8301eac78d542a6b5b9db1ee2a0b7844",
+    "build": "node --check on 18 modules (including public/app.js): exit 0",
+    "targetedTests": "17/17 passed (31.0 s)",
+    "managedRevision": "5f8c95677a36d4c46d2c15776ebcf077f67073bad998a03854f8b3264f561b1c-57e9fe4d8325",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "public/app.js",
+      "sentinel.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately",
+      "browser render signatures were verified manually in headless Chromium; the node suite does not execute public/app.js"
+    ]
+  }
+}

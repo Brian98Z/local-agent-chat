@@ -1,0 +1,61 @@
+{
+  "feature": "member message visibility query and indexes",
+  "date": "2026-11-14",
+  "candidateSha256": "360bd30a78161118f47930c0a70a211d6647f6a3354540f9b132d1a74164eb4a",
+  "tests": "node --test: 173/173 passed (81.3 s)",
+  "dataset": "20,000-message broadcast-heavy conversation plus a 20,000-message directed-only conversation; 13 approved members; isolated data directory; Node 22.19.0",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "360bd30a78161118f47930c0a70a211d6647f6a3354540f9b132d1a74164eb4a",
+    "build": "node --check on 17 modules: exit 0",
+    "targetedTests": "9/9 passed (6.4 s)",
+    "managedRevision": "31f1633693d098cd15146761ead3fa4b9762fc53d3f5de3eb834ef5d85504502-43a42a34fe89",
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately"
+    ]
+  },
+  "httpMedians": {
+    "sparseMemberPage20kMs": {
+      "before": 17.53,
+      "after": 1.47,
+      "ratio": 0.08
+    },
+    "sparseMemberWait20kMs": {
+      "before": 17.66,
+      "after": 1.58,
+      "ratio": 0.09
+    },
+    "denseMemberPage20kMs": {
+      "before": 2.95,
+      "after": 3.61,
+      "note": "HTTP median includes transport noise; SQL cost delta +0.11 ms"
+    },
+    "adminState200MessagesMs": {
+      "before": 5.5,
+      "after": 5.41
+    },
+    "note": "median of three runs; sparse member has exactly one visible message at the tail of 20,000 invisible rows"
+  },
+  "sql": {
+    "sparseMemberPage180kMs": {
+      "before": 74.24,
+      "after": 0.19
+    },
+    "directedOnlyMemberPage180kMs": {
+      "before": 8.49,
+      "after": 0.61
+    },
+    "note": "180,001 directed-only rows in one conversation; same process, prepared statements, warmed cache"
+  },
+  "indexes": [
+    "messages_conversation_to(conversationId,\"to\",id)",
+    "messages_conversation_from(conversationId,\"from\",id)",
+    "messages_conversation_broadcast(conversationId,id) WHERE \"to\" IS NULL AND toAdmin = 0"
+  ],
+  "note": "Member pages now read a UNION of three indexed visibility branches and take the minimum of three LIMIT 1 seeks for earliest_available_id. The previous OR predicate scanned the whole conversation tail for members with few visible messages. UNION also removes duplicate rows matched by two branches (self-authored broadcast, self-directed message)."
+}

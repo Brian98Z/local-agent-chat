@@ -1,0 +1,103 @@
+{
+  "feature": "second ten-round micro-optimization batch",
+  "date": "2026-11-14",
+  "method": "function-level microbenchmarks and isolated HTTP checks; values are per operation",
+  "rounds": [
+    {
+      "round": 11,
+      "area": "earliest_available_id",
+      "change": "global cache keyed by (actor, conversation); cleared on message insert and messageRevision change",
+      "measure": "5.06 µs per repeated call; regression test covers empty conversation → first message"
+    },
+    {
+      "round": 12,
+      "area": "admin audit list",
+      "change": "cache the latest 200 audit rows, invalidated by every audit write",
+      "measure": "226 µs per state poll when audit is unchanged"
+    },
+    {
+      "round": 13,
+      "area": "attachments",
+      "change": "skip the per-page attachment query while the database has no attachments",
+      "measure": "54 µs per 200-message page with an empty attachments table"
+    },
+    {
+      "round": 14,
+      "area": "request body",
+      "change": "one shared TextDecoder for JSON bodies",
+      "measure": "0.06 µs per body"
+    },
+    {
+      "round": 15,
+      "area": "sentinel routing",
+      "change": "compiled mention regex cached per agent name",
+      "measure": "26 µs of regex builds avoided per message with 34 agents"
+    },
+    {
+      "round": 16,
+      "area": "pinned read",
+      "change": "single JOIN instead of pinned-id query plus message query",
+      "measure": "1.91 µs per request (one query removed)"
+    },
+    {
+      "round": 17,
+      "area": "presence",
+      "change": "heartbeat/activity entries store ISO timestamps once",
+      "measure": "~0.4 µs per online agent per state poll"
+    },
+    {
+      "round": 18,
+      "area": "active conversation",
+      "change": "in-process cache updated after create/activate/delete commits",
+      "measure": "1.91 µs per request/wake (one query removed)"
+    },
+    {
+      "round": 19,
+      "area": "message insert",
+      "change": "INSERT ... RETURNING the response row instead of a follow-up SELECT",
+      "measure": "2.04 µs per sent message"
+    },
+    {
+      "round": 20,
+      "area": "text validation",
+      "change": "single trim for one-sided validation",
+      "measure": "0.02 µs per 8 KB field"
+    }
+  ],
+  "rejected": [
+    {
+      "candidate": "covering index messages(conversationId,id,\"to\",\"from\",toAdmin)",
+      "measure": "conversation-list query 6.35 → 3.92 ms at 500 conversations, but insert cost +0.59 µs (+12.8%) on every message",
+      "decision": "rejected: write amplification for an on-demand read; not added"
+    }
+  ],
+  "note": "Rounds 14, 17 and 20 are sub-µs; they remove avoidable allocations. Rounds 12 and 13 are the largest per-poll wins in this batch. Cache invalidation invariants: audit writes go through audit(); earliest cache is cleared on insert and revision change; active conversation is updated only after a successful transaction; rosterRevision still governs the mention matcher.",
+  "tests": "node --test: 175/175 passed (81.0 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "e2c2f7091d903d6573bcd5739607b49f14884dd6c5a36434a0e02959faae84ec",
+    "build": "node --check on 17 modules: exit 0",
+    "targetedTests": "16/16 passed (30.0 s, includes sentinel, visibility, legacy payload, earliest-id and wake tests)",
+    "managedRevision": "4686e7b8e31c42a6352eeee6394d826f966deac9b99017668580fd2532c9233e-f373888ac492",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "sentinel.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately",
+      "the project-commit CLI has a 1 MiB input JSON limit; this cumulative candidate exceeds it, so commit was invoked through the extracted application_project source"
+    ],
+    "note": "cumulative candidate contains all 2026-11-14 changes, including both ten-round batches"
+  }
+}

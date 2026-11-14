@@ -1,0 +1,96 @@
+{
+  "feature": "third ten-round micro-optimization batch",
+  "date": "2026-11-14",
+  "method": "function-level microbenchmarks plus HTTP header checks; caches are process-local and invalidated by writes",
+  "rounds": [
+    {
+      "round": 21,
+      "area": "conversation list",
+      "change": "in-memory cache keyed by admin/member, cleared on message insert/delete, conversation create/rename/delete and pin changes",
+      "measure": "removes the 0.76 ms admin list and 6.5 ms member list query at 500 conversations; cache hit is a Map lookup"
+    },
+    {
+      "round": 22,
+      "area": "task list",
+      "change": "per-conversation cache cleared on every task/agent-status/conversation mutation",
+      "measure": "removes an 821 µs query per 500-task list"
+    },
+    {
+      "round": 23,
+      "area": "agent rows",
+      "change": "all/active agent rows cached on rosterRevision; shared by state, /api/agents and @ matching",
+      "measure": "removes a 52.7 µs query per 34-agent poll"
+    },
+    {
+      "round": 24,
+      "area": "static assets",
+      "change": "ETag from mtime/size; assets use no-cache with 304, index stays no-store",
+      "measure": "revalidation returns 0 body bytes; browser can reuse the parsed script"
+    },
+    {
+      "round": 25,
+      "area": "admin state",
+      "change": "one Date.now() for every agent in the response",
+      "measure": "33 fewer Date.now calls (~2.3 µs) per poll"
+    },
+    {
+      "round": 26,
+      "area": "message projection",
+      "change": "placeholder SQL string cached per page size",
+      "measure": "18.8 µs per 200-message page"
+    },
+    {
+      "round": 27,
+      "area": "avatars",
+      "change": "encoded SVG bytes cached by id+avatarHash, dropped on setAvatar",
+      "measure": "11.5 µs per repeated 4 KB avatar fetch"
+    },
+    {
+      "round": 28,
+      "area": "long-poll recheck",
+      "change": "per-second authorization rechecks status by actor id instead of re-hashing and looking up the token",
+      "measure": "~2.6 µs per second per waiter"
+    },
+    {
+      "round": 29,
+      "area": "message send",
+      "change": "plain messages return the row with empty mentions/attachments instead of running the projection helper",
+      "measure": "small per-send saving; response shape unchanged"
+    },
+    {
+      "round": 30,
+      "area": "conversation existence",
+      "change": "known-conversation set updated on create/delete replaces a query in readConversationId",
+      "measure": "1.9 µs per read request"
+    }
+  ],
+  "note": "Caches are invalidated only by writes and are not used for authentication; refreshMember still queries agent status each second. ETag/304 is protocol-level: the browser can skip re-downloading and re-parsing assets on reload; the test suite verifies headers and empty 304 bodies.",
+  "tests": "node --test: 176/176 passed (three isolated runs, 80.0-82.1 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "d16b635b0d2b51b84e2001857331fd651388c624c593f95dfbc957453c7f586a",
+    "build": "node --check on 17 modules: exit 0",
+    "targetedTests": "17/17 passed (30.3 s, includes sentinel, visibility, legacy payload, earliest-id, wake and static ETag tests)",
+    "managedRevision": "bba584ce6855ead31c94af4ca810bb237a3e4a3e549e176bb04c71ad6ebde7f8-ad0e046edf84",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "sentinel.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately",
+      "the project-commit CLI has a 1 MiB input JSON limit; this cumulative candidate exceeds it, so commit was invoked through the extracted application_project source"
+    ],
+    "note": "cumulative candidate contains all 2026-11-14 changes, including the three ten-round batches"
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "feature": "skip offscreen task/audit panel renders",
+  "date": "2026-11-14",
+  "method": "headless managed Chromium; renderState called with synthetic 500 conversations, 34 agents, 50 tasks, 200 audit rows; panels first forced offscreen then visible",
+  "results": {
+    "offscreenRenderMs": 9.9,
+    "visibleRenderMs": 29.2,
+    "offscreenTaskRows": 0,
+    "offscreenAuditRows": 0,
+    "visibleTaskRows": 50,
+    "visibleAuditRows": 200
+  },
+  "note": "renderState only calls renderTasks/renderAudit when the corresponding panel is visible. The IntersectionObserver triggers a sync when a panel enters the viewport, which then renders it. First-time card creation accounts for most of the 19 ms difference; steady-state polls additionally skip the signature work.",
+  "tests": "node --test: 177/177 passed (81.2 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "3c6f7744a8d46eff6a79c4a135257ea11917618381d8b20acf7e024aec34b6a6",
+    "build": "node --check on 18 modules (including public/app.js): exit 0",
+    "targetedTests": "21/21 passed (31.2 s)",
+    "managedRevision": "c1659737e0a75042f9e50da3abda960bddce239c46b3a9ecaf00c51adc882140-3f8cdfd269be",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "public/app.js",
+      "sentinel.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately",
+      "browser behavior was verified manually in headless Chromium; the node suite does not execute public/app.js."
+    ]
+  }
+}

@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, statSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
@@ -11,6 +11,8 @@ import { registerVoteGameTools } from './vote-game-tools.mjs';
 import { registerERC20Tools } from './erc20-tools.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
+const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
+const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 const MAX_BODY_BYTES = 64 * 1024;
 let packageVersion = 'unknown';
 try { packageVersion = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version || 'unknown'; } catch { /* keep unknown */ }
@@ -70,7 +72,8 @@ function text(value, field, minimum, maximum, trim = false) {
   if (typeof value !== 'string') fail(400, `${field} must be a string.`);
   const result = trim ? value.trim() : value;
   const length = result.length;
-  if (length < minimum || length > maximum || (minimum > 0 && !result.trim()) || result.includes('\0')) {
+  const blank = trim ? result === '' : value.trim() === '';
+  if (length < minimum || length > maximum || (minimum > 0 && blank) || result.includes('\0')) {
     fail(400, `${field} must contain ${minimum}..${maximum} characters, not be blank when required, and contain no NUL.`);
   }
   return result;
@@ -102,8 +105,14 @@ function avatarHash(svg) {
 }
 
 function integer(value, field, minimum, maximum) {
-  if (typeof value !== 'string' || !/^(0|[1-9]\d*)$/.test(value)) fail(400, `Invalid ${field}.`);
-  const parsed = Number(value);
+  if (typeof value !== 'string' || value.length === 0 || value.length > 16) fail(400, `Invalid ${field}.`);
+  if (value.length > 1 && value.charCodeAt(0) === 48) fail(400, `Invalid ${field}.`);
+  let parsed = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 48 || code > 57) fail(400, `Invalid ${field}.`);
+    parsed = parsed * 10 + code - 48;
+  }
   if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) fail(400, `Invalid ${field}.`);
   return parsed;
 }
@@ -138,13 +147,14 @@ async function jsonBody(request, maxBytes = MAX_BODY_BYTES) {
       chunks.push(chunk);
     });
     request.once('end', () => {
-      if (!rejected) resolveBody(Buffer.concat(chunks, length));
+      if (rejected) return;
+      resolveBody(chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, length));
     });
     request.once('aborted', () => rejectBody(new HttpError(400, 'Request was interrupted.')));
     request.once('error', () => rejectBody(new HttpError(400, 'Request body could not be read.')));
   });
   try {
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    return JSON.parse(UTF8_DECODER.decode(bytes));
   } catch {
     fail(400, 'Request body must be valid UTF-8 JSON.');
   }
@@ -162,20 +172,25 @@ function responseHeaders(response) {
 
 function send(response, status, value) {
   if (response.destroyed || response.writableEnded) return;
-  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  response.writeHead(status, JSON_HEADERS);
   response.end(JSON.stringify(value));
+}
+
+const localHostSets = new Map();
+function localHosts(port) {
+  let hosts = localHostSets.get(port);
+  if (!hosts) {
+    hosts = new Set(['127.0.0.1', 'localhost', '[::1]'].map((name) => port === 80 ? name : `${name}:${port}`));
+    if (port === 80) for (const name of ['127.0.0.1:80', 'localhost:80', '[::1]:80']) hosts.add(name);
+    localHostSets.set(port, hosts);
+  }
+  return hosts;
 }
 
 function localRequest(request, port) {
   const host = request.headers.host;
   if (request.headersDistinct.host?.length !== 1 || typeof host !== 'string') fail(403, 'Local Host required.');
-  const hosts = new Set(['127.0.0.1', 'localhost', '[::1]'].map((name) => port === 80 ? name : `${name}:${port}`));
-  if (port === 80) {
-    hosts.add('127.0.0.1:80');
-    hosts.add('localhost:80');
-    hosts.add('[::1]:80');
-  }
-  if (!hosts.has(host.toLowerCase())) fail(403, 'Local Host required.');
+  if (!localHosts(port).has(host.toLowerCase())) fail(403, 'Local Host required.');
   if (request.headers.origin !== undefined) {
     if (request.headersDistinct.origin?.length !== 1) fail(403, 'Cross-origin requests are not allowed.');
     let origin;
@@ -192,6 +207,14 @@ function localRequest(request, port) {
   const publicNavigation = request.method === 'GET' && request.headers['sec-fetch-mode'] === 'navigate'
     && request.headers['sec-fetch-dest'] === 'document' && STATIC_FILES.has(request.url.split('?', 1)[0]);
   if (request.headers['sec-fetch-site'] === 'cross-site' && !publicNavigation) fail(403, 'Cross-origin requests are not allowed.');
+}
+
+// Idempotent sends are verified against a digest, not the full request JSON:
+// storing the JSON duplicated every message body in the database.
+function clientPayloadMatches(stored, expected, digest) {
+  if (stored === digest || stored === expected) return true;
+  if (typeof stored !== 'string' || !stored.startsWith('{')) return false;
+  try { return JSON.stringify(JSON.parse(stored)) === expected; } catch { return false; }
 }
 
 function start(config) {
@@ -215,6 +238,7 @@ function start(config) {
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = FULL;
       PRAGMA busy_timeout = 3000;
+      PRAGMA cache_size = -32768;
       BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS conversations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -316,6 +340,11 @@ function start(config) {
       );
       CREATE INDEX IF NOT EXISTS attachments_message_id ON attachments(messageId);
       CREATE INDEX IF NOT EXISTS messages_conversation_id ON messages(conversationId,id);
+      -- Member visibility is a union of broadcast, directed-to, and authored rows.
+      -- These indexes let each branch seek instead of scanning the conversation tail.
+      CREATE INDEX IF NOT EXISTS messages_conversation_to ON messages(conversationId,"to",id);
+      CREATE INDEX IF NOT EXISTS messages_conversation_from ON messages(conversationId,"from",id);
+      CREATE INDEX IF NOT EXISTS messages_conversation_broadcast ON messages(conversationId,id) WHERE "to" IS NULL AND toAdmin = 0;
       CREATE UNIQUE INDEX IF NOT EXISTS messages_client_id ON messages(conversationId,"from",clientMessageId) WHERE clientMessageId IS NOT NULL;
       CREATE INDEX IF NOT EXISTS tasks_conversation_id ON tasks(conversationId,id);
       COMMIT;
@@ -346,6 +375,7 @@ function start(config) {
   registerERC20Tools(groupTools, toolContext);
   groupTools.seal();
 
+  const staticAssets = new Map();
   const statements = new Map();
   function sql(query) {
     if (!statements.has(query)) statements.set(query, db.prepare(query));
@@ -363,26 +393,81 @@ function start(config) {
     }
   }
   const publicAgent = (row) => ({ id: row.id, name: row.name, status: row.status, model: row.model, createdAt: row.createdAt, avatarHash: row.avatarHash || '' });
-  const setAvatar = (id, svg) => sql('UPDATE agents SET avatarSvg = ?, avatarHash = ? WHERE id = ?').run(svg, avatarHash(svg), id);
-  const getAgent = (id) => sql('SELECT id,name,status,model,createdAt,avatarHash FROM agents WHERE id = ?').get(id);
-  const getTask = (id) => sql('SELECT * FROM tasks WHERE id = ?').get(id);
-  const allTasks = (conversationId) => sql('SELECT * FROM tasks WHERE conversationId = ? ORDER BY id').all(conversationId);
-  const audit = (actor, action, target, now) => sql('INSERT INTO audit (actor,action,target,createdAt) VALUES (?,?,?,?)').run(actor, action, String(target), now);
-  const getConversation = (id) => sql('SELECT id,title,createdAt FROM conversations WHERE id = ?').get(id);
-  const allConversations = (actor) => {
-    if (actor && actor.admin) return sql('SELECT c.id,c.title,c.createdAt,c.pinnedMessageId,COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.conversationId = c.id),0) AS latestMessageId FROM conversations c ORDER BY c.id DESC').all();
-    return sql(`SELECT c.id,c.title,c.createdAt,
-      COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.conversationId = c.id AND ((m."to" IS NULL AND m.toAdmin = 0) OR m."to" = ? OR m."from" = ?)),0) AS latestMessageId,
-      CASE WHEN c.pinnedMessageId IS NOT NULL AND EXISTS (SELECT 1 FROM messages p WHERE p.id = c.pinnedMessageId AND p.conversationId = c.id AND ((p."to" IS NULL AND p.toAdmin = 0) OR p."to" = ? OR p."from" = ?)) THEN c.pinnedMessageId ELSE NULL END AS pinnedMessageId
-      FROM conversations c ORDER BY c.id DESC`).all(actor.id, actor.id, actor.id, actor.id);
+  const setAvatar = (id, svg) => {
+    const hash = avatarHash(svg);
+    sql('UPDATE agents SET avatarSvg = ?, avatarHash = ? WHERE id = ?').run(svg, hash, id);
+    avatarBytesCache.delete(id);
+    invalidateRoster();
+    return hash;
   };
-  const activeConversationId = () => sql('SELECT activeConversationId FROM conversation_state WHERE id = 1').get().activeConversationId;
+  const getAgent = (id) => sql('SELECT id,name,status,model,createdAt,avatarHash FROM agents WHERE id = ?').get(id);
+  const conversationsCache = new Map();
+  const tasksCache = new Map();
+  const agentsCache = new Map();
+  const placeholderCache = new Map();
+  const avatarBytesCache = new Map();
+  const authCache = new Map();
+  const agentsByIdCache = new Map();
+  const conversationsByIdCache = new Map();
+  const knownConversations = new Set(sql('SELECT id FROM conversations').all().map((row) => row.id));
+  const getTask = (id) => sql('SELECT * FROM tasks WHERE id = ?').get(id);
+  const allTasks = (conversationId) => {
+    let rows = tasksCache.get(conversationId);
+    if (!rows) { rows = sql('SELECT * FROM tasks WHERE conversationId = ? ORDER BY id').all(conversationId); tasksCache.set(conversationId, rows); }
+    return rows;
+  };
+  const placeholdersFor = (size) => {
+    let value = placeholderCache.get(size);
+    if (!value) { value = Array.from({ length: size }, () => '?').join(','); placeholderCache.set(size, value); }
+    return value;
+  };
+  let auditCache = null;
+  const audit = (actor, action, target, now) => {
+    auditCache = null;
+    return sql('INSERT INTO audit (actor,action,target,createdAt) VALUES (?,?,?,?)').run(actor, action, String(target), now);
+  };
+  const getConversation = (id) => sql('SELECT id,title,createdAt FROM conversations WHERE id = ?').get(id);
+  const conversationCacheKey = (actor) => actor && actor.admin ? 'admin' : `member:${actor.id}`;
+  const allConversations = (actor) => {
+    const key = conversationCacheKey(actor);
+    let rows = conversationsCache.get(key);
+    if (!rows) {
+      rows = actor && actor.admin
+        ? sql('SELECT c.id,c.title,c.createdAt,c.pinnedMessageId,COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.conversationId = c.id),0) AS latestMessageId FROM conversations c ORDER BY c.id DESC').all()
+        : sql(`SELECT c.id,c.title,c.createdAt,
+          COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.conversationId = c.id AND ((m."to" IS NULL AND m.toAdmin = 0) OR m."to" = ? OR m."from" = ?)),0) AS latestMessageId,
+          CASE WHEN c.pinnedMessageId IS NOT NULL AND EXISTS (SELECT 1 FROM messages p WHERE p.id = c.pinnedMessageId AND p.conversationId = c.id AND ((p."to" IS NULL AND p.toAdmin = 0) OR p."to" = ? OR p."from" = ?)) THEN c.pinnedMessageId ELSE NULL END AS pinnedMessageId
+          FROM conversations c ORDER BY c.id DESC`).all(actor.id, actor.id, actor.id, actor.id);
+      conversationsCache.set(key, rows);
+      conversationsByIdCache.set(key, new Map(rows.map((row) => [row.id, row])));
+    }
+    return rows;
+  };
+  function cachedConversation(actor, id) {
+    const key = conversationCacheKey(actor);
+    if (!conversationsByIdCache.has(key)) allConversations(actor);
+    const byId = conversationsByIdCache.get(key);
+    return byId ? byId.get(id) || null : null;
+  }
+  function allAgentRows() {
+    let rows = agentsCache.get('all');
+    if (!rows) { rows = sql('SELECT id,name,status,model,createdAt,avatarHash FROM agents ORDER BY createdAt,id').all(); agentsCache.set('all', rows); }
+    return rows;
+  }
+  function activeAgentRows() {
+    let rows = agentsCache.get('active');
+    if (!rows) { rows = sql("SELECT id,name,status,model,createdAt,avatarHash FROM agents WHERE status = 'active' ORDER BY createdAt,id").all(); agentsCache.set('active', rows); }
+    return rows;
+  }
+  let activeConversationIdValue = sql('SELECT activeConversationId FROM conversation_state WHERE id = 1').get().activeConversationId;
+  const activeConversationId = () => activeConversationIdValue;
+  let attachmentsExist = sql('SELECT EXISTS(SELECT 1 FROM attachments) AS present').get().present === 1;
 
   function readConversationId(searchParams) {
     if (searchParams.getAll('conversationId').length > 1) fail(400, 'Repeated conversationId parameter.');
     const value = searchParams.get('conversationId');
     const id = value === null ? activeConversationId() : integer(value, 'conversationId', 1, Number.MAX_SAFE_INTEGER);
-    if (!getConversation(id)) fail(404, 'Conversation not found.');
+    if (!knownConversations.has(id)) fail(404, 'Conversation not found.');
     return id;
   }
 
@@ -432,50 +517,129 @@ function start(config) {
     sql('UPDATE conversations SET title = ? WHERE id = ? AND title = ?').run(title, conversationId, conversation.title);
   }
 
-  function withAttachments(messages) {
+  let rosterRevision = 0;
+  let mentionCache = null;
+  function invalidateRoster() {
+    rosterRevision += 1;
+    agentsCache.clear();
+    agentsByIdCache.clear();
+    authCache.clear();
+  }
+  function withAttachments(messages, skipAttachments = false) {
     if (!messages.length) return messages;
-    // Resolve the current active roster once per synchronous message projection.
-    const mentionPatterns = sql("SELECT id,name FROM agents WHERE status = 'active' ORDER BY id").all().map((agent) => {
-      const escaped = agent.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      return { id: agent.id, pattern: new RegExp(`@${escaped}(?![\\p{L}\\p{N}_])`, 'iu') };
-    });
+    // Only pages that contain '@' need the active roster; names are immutable, so compiled
+    // patterns are cached until a join or status change bumps rosterRevision.
+    let mentionMatcher = null;
+    if (messages.some((message) => message.text.includes('@'))) {
+      if (!mentionCache || mentionCache.revision !== rosterRevision) {
+        const roster = activeAgentRows();
+        const names = roster.map((agent) => agent.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        mentionCache = {
+          revision: rosterRevision,
+          pattern: names.length ? new RegExp(`@(${names.join('|')})(?![\\p{L}\\p{N}_])`, 'giu') : null,
+          byName: new Map(roster.map((agent) => [agent.name.toLowerCase(), agent.id])),
+        };
+      }
+      mentionMatcher = mentionCache;
+    }
     const attachmentsByMessage = new Map();
-    // Callers supply at most one page (200 IDs); cache one statement per page size.
-    const placeholders = messages.map(() => '?').join(',');
-    const attachments = sql(`SELECT messageId,id,name,contentType,size FROM attachments WHERE messageId IN (${placeholders}) ORDER BY messageId,rowid`).all(...messages.map((message) => message.id));
-    for (const { messageId, ...attachment } of attachments) {
-      let list = attachmentsByMessage.get(messageId);
-      if (!list) attachmentsByMessage.set(messageId, list = []);
-      list.push(attachment);
+    if (!skipAttachments && attachmentsExist) {
+      // Callers supply at most one page (200 IDs); cache one statement per page size.
+      const placeholders = placeholdersFor(messages.length);
+      const attachments = sql(`SELECT messageId,id,name,contentType,size FROM attachments WHERE messageId IN (${placeholders}) ORDER BY messageId,rowid`).all(...messages.map((message) => message.id));
+      for (const { messageId, ...attachment } of attachments) {
+        let list = attachmentsByMessage.get(messageId);
+        if (!list) attachmentsByMessage.set(messageId, list = []);
+        list.push(attachment);
+      }
     }
     return messages.map((message) => {
       const mentions = [];
-      if (message.text.includes('@')) {
-        for (const { id, pattern } of mentionPatterns) {
-          if (pattern.test(message.text)) mentions.push(id);
+      if (mentionMatcher?.pattern) {
+        const pattern = mentionMatcher.pattern;
+        pattern.lastIndex = 0;
+        const found = new Set();
+        let match;
+        while ((match = pattern.exec(message.text))) {
+          const id = mentionMatcher.byName.get(match[1].toLowerCase());
+          if (id) found.add(id);
         }
+        if (found.size) { mentions.push(...found); mentions.sort(); }
       }
       const { clientPayload, ...publicMessage } = message;
       return { ...publicMessage, mentions, attachments: attachmentsByMessage.get(message.id) ?? [] };
     });
   }
 
+  // One explicit "to" column: SELECT * plus a CASE alias duplicates the column name, and a
+  // compound UNION keeps the first name table, so the computed value would be lost.
+  // clientPayload is write-side idempotency state; every response strips it, so reads skip it.
+  const messageColumns = 'id,"from",CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to",text,createdAt,conversationId,toAdmin,replyTo,clientMessageId,kind,editedAt';
+  const messageProjection = `SELECT ${messageColumns} FROM messages`;
+  // Member visibility is the union of three indexable branches. A single OR predicate
+  // made SQLite scan the whole conversation tail for members with few visible rows:
+  // 20k invisible messages cost ~9 ms per poll; the union seeks each branch and costs ~0.2 ms.
+  // UNION (not ALL) drops rows matched by two branches, e.g. a broadcast the member authored.
+  function memberVisibility(comparator, order) {
+    const arm = (condition) => `SELECT * FROM (${messageProjection} WHERE conversationId = ? AND id ${comparator} ? AND ${condition} ORDER BY id ${order} LIMIT ?)`;
+    return `${arm('"to" IS NULL AND toAdmin = 0')} UNION ${arm('"to" = ?')} UNION ${arm('"from" = ?')} ORDER BY id ${order} LIMIT ?`;
+  }
+  const memberAfterSql = memberVisibility('>', 'ASC');
+  const memberBeforeSql = memberVisibility('<', 'DESC');
+  const memberFirst = (condition) => sql(`SELECT id FROM messages WHERE conversationId = ? AND ${condition} ORDER BY id LIMIT 1`);
+
   function visibleMessages(actor, conversationId, after, limit) {
-    const rows = actor.admin
-      ? sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? AND id > ? ORDER BY id LIMIT ?').all(conversationId, after, limit)
-      : sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? AND id > ? AND (("to" IS NULL AND toAdmin = 0) OR "to" = ? OR "from" = ?) ORDER BY id LIMIT ?').all(conversationId, after, actor.id, actor.id, limit);
+    if (!actor.admin) {
+      const rows = sql(memberAfterSql).all(conversationId, after, limit, conversationId, after, actor.id, limit, conversationId, after, actor.id, limit, limit);
+      return withAttachments(rows);
+    }
+    const rows = sql(`${messageProjection} WHERE conversationId = ? AND id > ? ORDER BY id LIMIT ?`).all(conversationId, after, limit);
     return withAttachments(rows);
   }
 
+  function visibleMessagesBefore(actor, conversationId, before, limit) {
+    if (!actor.admin) {
+      return withAttachments(sql(memberBeforeSql).all(conversationId, before, limit, conversationId, before, actor.id, limit, conversationId, before, actor.id, limit, limit));
+    }
+    return withAttachments(sql(`${messageProjection} WHERE conversationId = ? AND id < ? ORDER BY id DESC LIMIT ?`).all(conversationId, before, limit));
+  }
+
+  const earliestCache = new Map();
+  let earliestCacheRevision = -1;
   function earliestAvailableId(actor, conversationId) {
-    const row = actor.admin
-      ? sql('SELECT MIN(id) AS id FROM messages WHERE conversationId = ?').get(conversationId)
-      : sql('SELECT MIN(id) AS id FROM messages WHERE conversationId = ? AND (("to" IS NULL AND toAdmin = 0) OR "to" = ? OR "from" = ?)').get(conversationId, actor.id, actor.id);
-    return row.id;
+    if (earliestCacheRevision !== messageRevision) {
+      earliestCache.clear();
+      earliestCacheRevision = messageRevision;
+    }
+    const key = `${actor.admin ? 'admin' : actor.id}:${conversationId}`;
+    if (earliestCache.has(key)) return earliestCache.get(key);
+    let value = null;
+    if (actor.admin) {
+      value = memberFirst('1').get(conversationId)?.id ?? null;
+    } else {
+      const ids = [
+        memberFirst('"to" IS NULL AND toAdmin = 0').get(conversationId)?.id,
+        memberFirst('"to" = ?').get(conversationId, actor.id)?.id,
+        memberFirst('"from" = ?').get(conversationId, actor.id)?.id,
+      ].filter((id) => Number.isInteger(id));
+      value = ids.length ? Math.min(...ids) : null;
+    }
+    earliestCache.set(key, value);
+    return value;
+  }
+
+  let pinnedMessageCache = null;
+  function pinnedMessageForAdmin(conversationId, pinnedId) {
+    const key = `${conversationId}:${pinnedId}:${messageRevision}`;
+    if (pinnedMessageCache && pinnedMessageCache.key === key) return pinnedMessageCache.value;
+    const value = sql('SELECT id,"from",CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to",text,createdAt,toAdmin,editedAt FROM messages WHERE id = ? AND conversationId = ?').get(pinnedId, conversationId) || null;
+    pinnedMessageCache = { key, value };
+    return value;
   }
 
   const eventWaiters = new Set();
   let wakeScheduled = false;
+  let wakeAgain = false;
   // Heartbeats are process-local observations, not persisted presence claims.
   const heartbeats = new Map();
   const heartbeatMaxGapMs = 45000;
@@ -484,10 +648,13 @@ function start(config) {
   const activities = new Map();
   const activityMaxGapMs = 45000;
   const activityStates = ['thinking', 'generating', 'idle'];
+  function touchHeartbeat(agentId, at = Date.now()) {
+    heartbeats.set(agentId, { at, iso: new Date(at).toISOString() });
+  }
   function currentActivity(agentId, now) {
     const entry = activities.get(agentId);
     if (!entry || now - entry.at > activityMaxGapMs) return null;
-    return { state: entry.state, detail: entry.detail, at: new Date(entry.at).toISOString() };
+    return { state: entry.state, detail: entry.detail, at: entry.iso };
   }
   function withPresence(agent, now) {
     const last = heartbeats.get(agent.id);
@@ -495,20 +662,29 @@ function start(config) {
     const memberStatus = agent.status === 'active' || agent.status === 'paused';
     return {
       ...agent,
-      lastHeartbeatAt: last === undefined ? null : new Date(last).toISOString(),
-      online: memberStatus && ((last !== undefined && now - last <= heartbeatMaxGapMs) || activity !== null),
+      lastHeartbeatAt: last === undefined ? null : last.iso,
+      online: memberStatus && ((last !== undefined && now - last.at <= heartbeatMaxGapMs) || activity !== null),
       activity,
     };
   }
+  const WAKE_BATCH = 8;
   function wakeEventWaiters() {
     // Fan-out runs after the write response so a sender never waits for every waiter.
-    // Bursts coalesce into one wake per waiter within the same tick.
-    if (wakeScheduled) return;
+    // Waiters are woken in bounded batches: one long synchronous loop over every waiter
+    // would stall the event loop (and every other request) for ~0.5 ms per waiter.
+    // A write that lands mid-fan-out sets wakeAgain so those waiters see it too.
+    if (wakeScheduled) { wakeAgain = true; return; }
     wakeScheduled = true;
-    setImmediate(() => {
+    const waiters = [...eventWaiters];
+    let index = 0;
+    const drain = () => {
+      const end = Math.min(index + WAKE_BATCH, waiters.length);
+      while (index < end) { waiters[index](); index += 1; }
+      if (index < waiters.length) { setImmediate(drain); return; }
       wakeScheduled = false;
-      for (const wake of eventWaiters) wake();
-    });
+      if (wakeAgain) { wakeAgain = false; wakeEventWaiters(); }
+    };
+    setImmediate(drain);
   }
 
   const adminToken = randomBytes(32).toString('hex');
@@ -530,8 +706,13 @@ function start(config) {
       if (requirement === 'agent') fail(403, 'An agent identity is required.');
       return { id: 'admin', admin: true };
     }
-    const row = sql('SELECT id,name,status,model,createdAt,avatarHash FROM agents WHERE tokenHash = ?').get(hash);
-    if (!row) fail(401, 'A valid bearer token is required.');
+    let row = authCache.get(hash);
+    if (!row) {
+      row = sql('SELECT id,name,status,model,createdAt,avatarHash FROM agents WHERE tokenHash = ?').get(hash);
+      if (!row) fail(401, 'A valid bearer token is required.');
+      row = { ...row, admin: false };
+      authCache.set(hash, row);
+    }
     if (requirement === 'admin') fail(403, 'Administrator authorization is required.');
     // Muted (paused) members keep read access; only active members may write.
     if (requirement === 'active' && row.status !== 'active') {
@@ -539,10 +720,24 @@ function start(config) {
       fail(403, 'Agent is not active; administrator approval is required.');
     }
     if (requirement === 'member' && row.status !== 'active' && row.status !== 'paused') fail(403, 'Agent is not active; administrator approval is required.');
-    return { ...row, admin: false };
+    return row;
   }
 
-  function waitForEvents(request, response, conversationId, after, timeout) {
+  function refreshMember(actor) {
+    if (stopping) fail(503, 'Server is stopping.');
+    if (actor.admin) return actor;
+    let row = agentsByIdCache.get(actor.id);
+    if (!row) {
+      row = allAgentRows().find((agent) => agent.id === actor.id) || null;
+      if (row) agentsByIdCache.set(actor.id, row);
+    }
+    if (!row) fail(401, 'A valid bearer token is required.');
+    // Muted members keep read access; revoked or pending members cannot continue waiting.
+    if (row.status !== 'active' && row.status !== 'paused') fail(403, 'Agent is not active; administrator approval is required.');
+    return row;
+  }
+
+  function waitForEvents(request, response, conversationId, after, timeout, actor) {
     return new Promise((resolveWait, rejectWait) => {
       let settled = false;
       let deadlineTimer;
@@ -564,20 +759,20 @@ function start(config) {
       function check(timedOut = false) {
         if (settled) return;
         try {
-          const actor = authenticate(request, 'member');
+          const current = refreshMember(actor);
           const activeId = activeConversationId();
           if (activeId !== conversationId) {
-            finish(null, { conversationId: activeId, changed: true, messages: [], cursor: 0, reason: 'conversation_changed', earliest_available_id: earliestAvailableId(actor, activeId) });
+            finish(null, { conversationId: activeId, changed: true, messages: [], cursor: 0, reason: 'conversation_changed', earliest_available_id: earliestAvailableId(current, activeId) });
             return;
           }
-          const messages = visibleMessages(actor, activeId, after, 100);
+          const messages = visibleMessages(current, activeId, after, 100);
           if (messages.length || timedOut) {
             finish(null, {
               conversationId: activeId,
               changed: false,
               messages,
               cursor: messages.at(-1)?.id ?? after,
-              earliest_available_id: earliestAvailableId(actor, activeId),
+              earliest_available_id: earliestAvailableId(current, activeId),
               reason: messages.length ? 'messages' : 'timeout',
             });
           }
@@ -598,7 +793,7 @@ function start(config) {
       // Only authorization is polled; conversation/message reads are event-driven.
       authorizationTimer = setInterval(() => {
         try {
-          authenticate(request, 'member');
+          refreshMember(actor);
         } catch (error) {
           finish(error);
         }
@@ -620,14 +815,27 @@ function start(config) {
     if (STATIC_FILES.has(path)) {
       if (method !== 'GET' && method !== 'HEAD') fail(405, 'Method not allowed.');
       const [filename, contentType] = STATIC_FILES.get(path);
-      let bytes;
+      let asset;
       try {
-        bytes = await readFile(join(ROOT, 'public', filename));
+        const file = join(ROOT, 'public', filename);
+        const info = await stat(file);
+        asset = staticAssets.get(filename);
+        if (!asset || asset.mtimeMs !== info.mtimeMs || asset.size !== info.size) {
+          asset = { mtimeMs: info.mtimeMs, size: info.size, bytes: await readFile(file) };
+          staticAssets.set(filename, asset);
+        }
       } catch {
         fail(503, 'Web interface is unavailable.');
       }
-      response.writeHead(200, { 'Content-Type': contentType, 'Content-Length': bytes.length, 'Cache-Control': 'no-store' });
-      response.end(method === 'HEAD' ? undefined : bytes);
+      const etag = `"${asset.mtimeMs.toString(16)}-${asset.size.toString(16)}"`;
+      const cacheControl = filename === 'index.html' ? 'no-store' : 'no-cache';
+      if (filename !== 'index.html' && request.headers['if-none-match'] === etag) {
+        response.writeHead(304, { 'ETag': etag, 'Cache-Control': cacheControl });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'Content-Type': contentType, 'Content-Length': asset.bytes.length, 'Cache-Control': cacheControl, 'ETag': etag });
+      response.end(method === 'HEAD' ? undefined : asset.bytes);
       return;
     }
 
@@ -643,12 +851,16 @@ function start(config) {
       if (existing) {
         // Revoked identities cannot write through re-join; only approved/muted members may update their avatar.
         const canUpdate = existing.status === 'active' || existing.status === 'paused';
-        if (!existing.model && existing.status !== 'revoked') sql('UPDATE agents SET model = ? WHERE id = ?').run(model, existing.id);
+        if (!existing.model && existing.status !== 'revoked') {
+          sql('UPDATE agents SET model = ? WHERE id = ?').run(model, existing.id);
+          existing.model = model;
+          invalidateRoster();
+        }
         if (avatarSvg && canUpdate) {
-          setAvatar(existing.id, avatarSvg);
+          existing.avatarHash = setAvatar(existing.id, avatarSvg);
           audit(existing.id, 'agent.avatar', existing.id, new Date().toISOString());
         }
-        return send(response, 200, { agent: publicAgent(getAgent(existing.id)) });
+        return send(response, 200, { agent: publicAgent(existing) });
       }
       if (!avatarSvg) fail(400, 'New members must provide an SVG avatar in avatarSvg.');
       if (!registrationOpen) fail(403, 'New registration is closed.');
@@ -660,6 +872,7 @@ function start(config) {
         sql("INSERT INTO agents (id,name,nameKey,tokenHash,status,model,createdAt,avatarSvg,avatarHash) VALUES (?,?,?,?,'pending',?,?,?,?)").run(id, name, nameKey, hash, model, now, avatarSvg, avatarHash(avatarSvg));
         audit(id, 'agent.join', id, now);
       });
+      invalidateRoster();
       return send(response, 201, { agent: getAgent(id) });
     }
 
@@ -682,14 +895,26 @@ function start(config) {
       authenticate(request, 'member');
       const match = /^\/api\/avatars\/([0-9a-f-]{36})$/.exec(path);
       if (!match) fail(404, 'Avatar not found.');
-      const row = sql('SELECT avatarSvg FROM agents WHERE id = ?').get(match[1]);
+      const row = sql('SELECT avatarSvg,avatarHash FROM agents WHERE id = ?').get(match[1]);
       if (!row || !row.avatarSvg) fail(404, 'Avatar not found.');
-      const bytes = Buffer.from(row.avatarSvg, 'utf8');
+      let cached = avatarBytesCache.get(match[1]);
+      if (!cached || cached.hash !== (row.avatarHash || '')) {
+        cached = { hash: row.avatarHash || avatarHash(row.avatarSvg), bytes: Buffer.from(row.avatarSvg, 'utf8') };
+        avatarBytesCache.set(match[1], cached);
+      }
+      const bytes = cached.bytes;
+      const etag = `"${cached.hash}"`;
+      if (request.headers['if-none-match'] === etag) {
+        response.writeHead(304, { 'ETag': etag, 'Cache-Control': 'private, no-cache' });
+        response.end();
+        return;
+      }
       response.writeHead(200, {
         'Content-Type': 'image/svg+xml; charset=utf-8',
         'Content-Length': bytes.length,
         'X-Content-Type-Options': 'nosniff',
         'Cache-Control': 'private, no-cache',
+        'ETag': etag,
       });
       response.end(request.method === 'HEAD' ? undefined : bytes);
       return;
@@ -702,15 +927,10 @@ function start(config) {
         if (url.searchParams.getAll(key).length > 1) fail(400, 'Repeated conversationId parameter.');
       }
       const conversationId = readConversationId(url.searchParams);
-      const row = sql('SELECT pinnedMessageId FROM conversations WHERE id = ?').get(conversationId);
-      const pinnedId = row && row.pinnedMessageId ? row.pinnedMessageId : null;
-      let pinnedMessage = null;
-      if (pinnedId) {
-        const projection = 'SELECT id,"from",CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to",text,createdAt,toAdmin,editedAt FROM messages WHERE id = ? AND conversationId = ?';
-        pinnedMessage = actor.admin
-          ? sql(projection).get(pinnedId, conversationId) || null
-          : sql(projection + ' AND (("to" IS NULL AND toAdmin = 0) OR "to" = ? OR "from" = ?)').get(pinnedId, conversationId, actor.id, actor.id) || null;
-      }
+      const pinnedSelect = 'SELECT m.id,m."from",CASE WHEN m.toAdmin = 1 THEN \'admin\' ELSE m."to" END AS "to",m.text,m.createdAt,m.toAdmin,m.editedAt FROM conversations c JOIN messages m ON m.id = c.pinnedMessageId AND m.conversationId = c.id WHERE c.id = ?';
+      const pinnedMessage = actor.admin
+        ? sql(pinnedSelect).get(conversationId) || null
+        : sql(pinnedSelect + ' AND ((m."to" IS NULL AND m.toAdmin = 0) OR m."to" = ? OR m."from" = ?)').get(conversationId, actor.id, actor.id) || null;
       return send(response, 200, { conversationId, pinnedMessage });
     }
 
@@ -732,6 +952,10 @@ function start(config) {
         audit('admin', 'conversation.create', result.lastInsertRowid, now.toISOString());
         return getConversation(result.lastInsertRowid);
       });
+      activeConversationIdValue = conversation.id;
+      conversationsCache.clear();
+      conversationsByIdCache.clear();
+      knownConversations.add(conversation.id);
       wakeEventWaiters();
       return send(response, 201, { conversation, activeConversationId: conversation.id });
     }
@@ -750,6 +974,8 @@ function start(config) {
         audit('admin', 'conversation.rename', id, new Date().toISOString());
         return getConversation(id);
       });
+      conversationsCache.clear();
+      conversationsByIdCache.clear();
       wakeEventWaiters();
       return send(response, 200, { conversation, conversations: allConversations({ admin: true }) });
     }
@@ -768,6 +994,7 @@ function start(config) {
         audit('admin', 'conversation.activate', id, new Date().toISOString());
         return current;
       });
+      activeConversationIdValue = conversation.id;
       wakeEventWaiters();
       return send(response, 200, { conversation, activeConversationId: conversation.id });
     }
@@ -785,17 +1012,23 @@ function start(config) {
         if (!conversation) fail(404, 'Conversation not found.');
         const count = sql('SELECT COUNT(*) AS count FROM conversations').get().count;
         if (count <= 1) fail(409, 'Cannot delete the last conversation.');
-        if (activeConversationId() === id) {
-          const next = sql('SELECT id FROM conversations WHERE id != ? ORDER BY id DESC LIMIT 1').get(id).id;
-          sql('UPDATE conversation_state SET activeConversationId = ? WHERE id = 1').run(next);
+        let nextActive = activeConversationId();
+        if (nextActive === id) {
+          nextActive = sql('SELECT id FROM conversations WHERE id != ? ORDER BY id DESC LIMIT 1').get(id).id;
+          sql('UPDATE conversation_state SET activeConversationId = ? WHERE id = 1').run(nextActive);
         }
         sql('DELETE FROM messages WHERE conversationId = ?').run(id);
         sql('DELETE FROM tasks WHERE conversationId = ?').run(id);
         scoring.deleteConversation(id);
         sql('DELETE FROM conversations WHERE id = ?').run(id);
         audit('admin', 'conversation.delete', id, now);
-        return { deletedId: id, activeConversationId: activeConversationId() };
+        return { deletedId: id, activeConversationId: nextActive };
       });
+      activeConversationIdValue = result.activeConversationId;
+      conversationsCache.clear();
+      conversationsByIdCache.clear();
+      tasksCache.clear();
+      knownConversations.delete(id);
       wakeEventWaiters();
       return send(response, 200, { ...result, conversations: allConversations({ admin: true }) });
     }
@@ -805,23 +1038,31 @@ function start(config) {
       const includeMessagesValue = url.searchParams.get('includeMessages');
       if (includeMessagesValue !== null && includeMessagesValue !== '0' && includeMessagesValue !== '1') fail(400, 'includeMessages must be 0 or 1.');
       const includeMessages = includeMessagesValue !== '0';
+      const includeAuditValue = url.searchParams.get('includeAudit');
+      if (includeAuditValue !== null && includeAuditValue !== '0' && includeAuditValue !== '1') fail(400, 'includeAudit must be 0 or 1.');
+      const includeAudit = includeAuditValue !== '0';
+      const includeTasksValue = url.searchParams.get('includeTasks');
+      if (includeTasksValue !== null && includeTasksValue !== '0' && includeTasksValue !== '1') fail(400, 'includeTasks must be 0 or 1.');
+      const includeTasks = includeTasksValue !== '0';
       const conversationId = activeConversationId();
-      const latestMessageId = sql('SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE conversationId = ?').get(conversationId).id;
-      const conversationRow = sql('SELECT pinnedMessageId FROM conversations WHERE id = ?').get(conversationId);
-      const pinnedMessageId = conversationRow && conversationRow.pinnedMessageId ? conversationRow.pinnedMessageId : null;
-      const pinnedMessage = pinnedMessageId === null ? null : sql('SELECT id,"from",CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to",text,createdAt,toAdmin,editedAt FROM messages WHERE id = ? AND conversationId = ?').get(pinnedMessageId, conversationId) || null;
+      const conversations = allConversations({ admin: true });
+      const activeConversation = cachedConversation({ admin: true }, conversationId);
+      const latestMessageId = activeConversation?.latestMessageId ?? 0;
+      const pinnedMessageId = activeConversation?.pinnedMessageId ?? null;
+      const pinnedMessage = pinnedMessageId === null ? null : pinnedMessageForAdmin(conversationId, pinnedMessageId);
+      const now = Date.now();
       return send(response, 200, {
         registrationOpen,
-        conversations: allConversations({ admin: true }),
+        conversations,
         activeConversationId: conversationId,
         latestMessageId,
         messageRevision,
         pinnedMessageId,
         pinnedMessage,
-        agents: sql('SELECT id,name,status,model,createdAt,avatarHash FROM agents ORDER BY createdAt,id').all().map((agent) => withPresence(agent, Date.now())),
-        messages: includeMessages ? withAttachments(sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? ORDER BY id DESC LIMIT 200').all(conversationId).reverse()) : [],
-        tasks: allTasks(conversationId),
-        audit: sql('SELECT * FROM audit ORDER BY id DESC LIMIT 200').all().reverse(),
+        agents: allAgentRows().map((agent) => withPresence(agent, now)),
+        messages: includeMessages ? withAttachments(sql(`${messageProjection} WHERE conversationId = ? ORDER BY id DESC LIMIT 200`).all(conversationId).reverse()) : [],
+        tasks: includeTasks ? allTasks(conversationId) : [],
+        audit: includeAudit ? (auditCache ?? (auditCache = sql('SELECT * FROM audit ORDER BY id DESC LIMIT 200').all().reverse())) : [],
       });
     }
 
@@ -830,7 +1071,12 @@ function start(config) {
       const databasePath = join(config.dataDir, 'chat.sqlite');
       const fileSize = (file) => { try { return statSync(file).size; } catch { return 0; } };
       const memory = process.memoryUsage();
-      const count = (table) => sql(`SELECT COUNT(*) AS count FROM ${table}`).get().count;
+      const counts = sql(`SELECT
+        (SELECT COUNT(*) FROM agents) AS agents,
+        (SELECT COUNT(*) FROM messages) AS messages,
+        (SELECT COUNT(*) FROM tasks) AS tasks,
+        (SELECT COUNT(*) FROM conversations) AS conversations,
+        (SELECT COUNT(*) FROM attachments) AS attachments`).get();
       return send(response, 200, {
         version: packageVersion,
         node: process.version,
@@ -840,11 +1086,11 @@ function start(config) {
         walBytes: fileSize(databasePath + '-wal'),
         messageRevision,
         counts: {
-          agents: count('agents'),
-          messages: count('messages'),
-          tasks: count('tasks'),
-          conversations: count('conversations'),
-          attachments: count('attachments'),
+          agents: counts.agents,
+          messages: counts.messages,
+          tasks: counts.tasks,
+          conversations: counts.conversations,
+          attachments: counts.attachments,
         },
         memory: { rss: memory.rss, heapUsed: memory.heapUsed },
       });
@@ -885,6 +1131,8 @@ function start(config) {
         }
         return { updated: targets.length };
       });
+      invalidateRoster();
+      tasksCache.clear();
       wakeEventWaiters();
       return send(response, 200, { action: body.action, updated: result.updated });
     }
@@ -909,6 +1157,8 @@ function start(config) {
           audit('admin', 'message.unpin', messageId, now);
         }
       });
+      conversationsCache.clear();
+      conversationsByIdCache.clear();
       const pinned = sql('SELECT pinnedMessageId FROM conversations WHERE id = ?').get(message.conversationId).pinnedMessageId ?? null;
       return send(response, 200, { conversationId: message.conversationId, pinnedMessageId: pinned });
     }
@@ -946,6 +1196,8 @@ function start(config) {
         audit('admin', 'message.delete', messageId, new Date().toISOString());
       });
       messageRevision += 1;
+      conversationsCache.clear();
+      conversationsByIdCache.clear();
       wakeEventWaiters();
       return send(response, 200, { deletedId: messageId, messageRevision });
     }
@@ -973,6 +1225,8 @@ function start(config) {
         }
         return getAgent(id);
       });
+      invalidateRoster();
+      tasksCache.clear();
       wakeEventWaiters();
       return send(response, 200, { agent });
     }
@@ -1039,17 +1293,16 @@ function start(config) {
       if (!activityStates.includes(state)) fail(400, 'state must be thinking, generating, or idle.');
       const detail = Object.hasOwn(body, 'detail') ? text(body.detail, 'detail', 0, 80, true) : '';
       const at = Date.now();
-      activities.set(actor.id, { state, detail, at });
+      const iso = new Date(at).toISOString();
+      activities.set(actor.id, { state, detail, at, iso });
       // A report is also proof of life so long generations stay visible.
-      heartbeats.set(actor.id, at);
-      return send(response, 200, { activity: { state, detail, at: new Date(at).toISOString() } });
+      touchHeartbeat(actor.id, at);
+      return send(response, 200, { activity: { state, detail, at: iso } });
     }
 
     if (path === '/api/agents' && method === 'GET') {
       const actor = authenticate(request, 'member');
-      const rows = actor.admin
-        ? sql('SELECT id,name,status,model,createdAt,avatarHash FROM agents ORDER BY createdAt,id').all()
-        : sql("SELECT id,name,status,model,createdAt,avatarHash FROM agents WHERE status = 'active' ORDER BY createdAt,id").all();
+      const rows = actor.admin ? allAgentRows() : activeAgentRows();
       const now = Date.now();
       return send(response, 200, { agents: rows.map((agent) => withPresence(agent, now)) });
     }
@@ -1063,9 +1316,9 @@ function start(config) {
       const conversationId = integer(url.searchParams.get('conversationId'), 'conversationId', 1, Number.MAX_SAFE_INTEGER);
       const after = integer(url.searchParams.get('after') ?? '0', 'after', 0, Number.MAX_SAFE_INTEGER);
       const timeout = integer(url.searchParams.get('timeout') ?? '25000', 'timeout', 1, 25000);
-      if (!actor.admin) heartbeats.set(actor.id, Date.now());
-      const result = await waitForEvents(request, response, conversationId, after, timeout);
-      if (!actor.admin && result !== null) heartbeats.set(actor.id, Date.now());
+      if (!actor.admin) touchHeartbeat(actor.id);
+      const result = await waitForEvents(request, response, conversationId, after, timeout, actor);
+      if (!actor.admin && result !== null) touchHeartbeat(actor.id);
       if (result !== null) return send(response, 200, result);
       return;
     }
@@ -1086,6 +1339,7 @@ function start(config) {
       if (quota.count >= 20 || quota.bytes + data.length > 50 * 1024 * 1024) fail(413, 'Unattached attachment quota exceeded.');
       const id = randomUUID();
       sql('INSERT INTO attachments (id,owner,name,contentType,size,data) VALUES (?,?,?,?,?,?)').run(id, actor.id, name, contentType, data.length, data);
+      attachmentsExist = true;
       return send(response, 201, { attachment: { id, name, contentType, size: data.length } });
     }
 
@@ -1132,7 +1386,7 @@ function start(config) {
         parameters.push(sender);
       }
       parameters.push(limit);
-      const rows = sql(`SELECT *, CASE WHEN toAdmin = 1 THEN 'admin' ELSE "to" END AS "to" FROM messages WHERE ${conditions.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...parameters);
+      const rows = sql(`${messageProjection} WHERE ${conditions.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...parameters);
       return send(response, 200, { messages: withAttachments(rows), query, conversationId, from: sender, earliest_available_id: earliestAvailableId(actor, conversationId) });
     }
 
@@ -1143,9 +1397,7 @@ function start(config) {
       const after = integer(url.searchParams.get('after') ?? '0', 'after', 0, Number.MAX_SAFE_INTEGER);
       const before = url.searchParams.has('before') ? integer(url.searchParams.get('before'), 'before', 1, Number.MAX_SAFE_INTEGER) : null;
       const limit = integer(url.searchParams.get('limit') ?? '100', 'limit', 1, 200);
-      const messages = before === null ? visibleMessages(actor, conversationId, after, limit) : withAttachments((actor.admin
-        ? sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? AND id < ? ORDER BY id DESC LIMIT ?').all(conversationId, before, limit)
-        : sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? AND id < ? AND (("to" IS NULL AND toAdmin = 0) OR "to" = ? OR "from" = ?) ORDER BY id DESC LIMIT ?').all(conversationId, before, actor.id, actor.id, limit)).reverse());
+      const messages = before === null ? visibleMessages(actor, conversationId, after, limit) : visibleMessagesBefore(actor, conversationId, before, limit).reverse();
       return send(response, 200, { messages, cursor: messages.at(-1)?.id ?? after, conversationId, earliest_available_id: earliestAvailableId(actor, conversationId) });
     }
 
@@ -1165,14 +1417,18 @@ function start(config) {
       const toAdmin = body.to === 'admin';
       if (toAdmin && actor.admin) fail(400, 'Administrator cannot send a message to itself.');
       const to = body.to === undefined || body.to === null || toAdmin ? null : agentId(body.to);
-      const clientPayload = JSON.stringify({ text: messageText, to: toAdmin ? 'admin' : to, replyTo: body.replyTo ?? null, attachmentIds, kind });
+      // Only idempotent sends need a payload digest; regular sends skip both the JSON and hash.
+      const clientPayload = clientMessageId === null ? null : JSON.stringify({ text: messageText, to: toAdmin ? 'admin' : to, replyTo: body.replyTo ?? null, attachmentIds, kind });
+      const clientPayloadDigest = clientPayload === null ? null : 'sha256:' + createHash('sha256').update(clientPayload).digest('hex');
       const message = transaction(() => {
         const conversationId = writeConversationId(body);
         if (clientMessageId !== null) {
           const existing = sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE conversationId = ? AND "from" = ? AND clientMessageId = ?').get(conversationId, actor.id, clientMessageId);
           if (existing) {
-            if (existing.clientPayload !== clientPayload) fail(409, 'clientMessageId already used with different message content.');
-            return withAttachments([existing])[0];
+            if (!clientPayloadMatches(existing.clientPayload, clientPayload, clientPayloadDigest)) fail(409, 'clientMessageId already used with different message content.');
+            // Rewrite legacy full-JSON payloads so old rows stop duplicating the body.
+            if (existing.clientPayload !== clientPayloadDigest) sql('UPDATE messages SET clientPayload = ? WHERE id = ?').run(clientPayloadDigest, existing.id);
+            return withAttachments([existing], attachmentIds.length === 0)[0];
           }
         }
         if (to !== null) {
@@ -1189,16 +1445,22 @@ function start(config) {
           if (to !== null && (targetMessage.to !== null || targetMessage.toAdmin) && to !== targetMessage.from && to !== targetMessage.to) fail(400, 'Reply recipient cannot see the referenced message.');
           replyTo = body.replyTo;
         }
-        const result = sql('INSERT INTO messages ("from","to",text,createdAt,conversationId,toAdmin,replyTo,clientMessageId,clientPayload,kind) VALUES (?,?,?,?,?,?,?,?,?,?)').run(actor.id, to, messageText, new Date().toISOString(), conversationId, toAdmin ? 1 : 0, replyTo, clientMessageId, clientMessageId === null ? null : clientPayload, kind);
-        if (actor.admin) scoring.selectMessageRound(conversationId, Number(result.lastInsertRowid));
+        const row = sql(`INSERT INTO messages ("from","to",text,createdAt,conversationId,toAdmin,replyTo,clientMessageId,clientPayload,kind) VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING ${messageColumns}`)
+          .get(actor.id, to, messageText, new Date().toISOString(), conversationId, toAdmin ? 1 : 0, replyTo, clientMessageId, clientMessageId === null ? null : clientPayloadDigest, kind);
+        if (actor.admin) scoring.selectMessageRound(conversationId, row.id);
         for (const id of attachmentIds) {
-          const updated = sql('UPDATE attachments SET messageId = ? WHERE id = ? AND owner = ? AND messageId IS NULL').run(result.lastInsertRowid, id, actor.id);
+          const updated = sql('UPDATE attachments SET messageId = ? WHERE id = ? AND owner = ? AND messageId IS NULL').run(row.id, id, actor.id);
           if (updated.changes !== 1) fail(404, 'Attachment not found or already attached.');
         }
-        const row = sql('SELECT *, CASE WHEN toAdmin = 1 THEN \'admin\' ELSE "to" END AS "to" FROM messages WHERE id = ?').get(result.lastInsertRowid);
         if (actor.admin && to === null) autoTitleConversation(conversationId, messageText);
-        return withAttachments([row])[0];
+        if (!messageText.includes('@') && attachmentIds.length === 0) return { ...row, mentions: [], attachments: [] };
+        return withAttachments([row], attachmentIds.length === 0)[0];
       });
+      // A new message can turn an empty conversation (or a member with no visible messages)
+      // into one with an earliest id; invalidation must include inserts, not just deletions.
+      earliestCache.clear();
+      conversationsCache.clear();
+      conversationsByIdCache.clear();
       wakeEventWaiters();
       return send(response, 201, { message });
     }
@@ -1225,6 +1487,9 @@ function start(config) {
         if (actor.admin) autoTitleConversation(conversationId, title);
         return row;
       });
+      tasksCache.clear();
+      conversationsCache.clear();
+      conversationsByIdCache.clear();
       return send(response, 201, { task });
     }
 
@@ -1247,6 +1512,7 @@ function start(config) {
         sql("UPDATE tasks SET owner = ?, status = 'claimed', updatedAt = ? WHERE id = ?").run(owner, now, id);
         audit('admin', 'task.assign', id, now);
       });
+      tasksCache.clear();
       return send(response, 200, { task: getTask(id) });
     }
 
@@ -1262,6 +1528,7 @@ function start(config) {
         sql('DELETE FROM tasks WHERE id = ?').run(id);
         audit('admin', 'task.delete', id, new Date().toISOString());
       });
+      tasksCache.clear();
       return send(response, 200, { deletedId: id });
     }
 
@@ -1300,6 +1567,7 @@ function start(config) {
         audit(actor.id, `task.${body.action}`, id, now);
         return getTask(id);
       });
+      tasksCache.clear();
       return send(response, 200, { task });
     }
 

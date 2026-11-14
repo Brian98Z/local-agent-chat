@@ -1,0 +1,96 @@
+{
+  "feature": "ten-round micro-optimization batch",
+  "date": "2026-11-14",
+  "method": "function-level microbenchmarks and isolated HTTP A/B runs; all values are per operation unless stated",
+  "rounds": [
+    {
+      "round": 1,
+      "area": "server static assets",
+      "change": "mtime/size-checked in-memory cache instead of readFile per request",
+      "measure": "GET /app.js p50 1.779 → 1.564 ms, p95 2.876 → 2.727 ms; readFile 408 µs vs stat 151 µs"
+    },
+    {
+      "round": 2,
+      "area": "server request body",
+      "change": "single-chunk bodies skip Buffer.concat",
+      "measure": "0.34 → 0.15 µs per small body"
+    },
+    {
+      "round": 3,
+      "area": "admin state",
+      "change": "latestMessageId/pinnedMessageId derived from the existing conversation list",
+      "measure": "two queries removed, 4.09 µs per poll"
+    },
+    {
+      "round": 4,
+      "area": "message projection",
+      "change": "one combined mention regex + name map cached per rosterRevision, roster query skipped when no message contains @",
+      "measure": "518.5 → 160.9 µs per 200-message page with 34 agents; roster query (17 µs) and regex build (26 µs) amortized"
+    },
+    {
+      "round": 5,
+      "area": "request host check",
+      "change": "host allow-list memoized per port",
+      "measure": "0.55 → 0.16 µs per request"
+    },
+    {
+      "round": 6,
+      "area": "sentinel history",
+      "change": "toAdmin schema check once at startup; broadcast/direct history statements prepared once",
+      "measure": "PRAGMA 25.6 µs + prepare 18.4 µs → 1.55 µs reuse per dispatched message"
+    },
+    {
+      "round": 7,
+      "area": "worker context",
+      "change": "roster and conversation list fetched concurrently",
+      "measure": "1.678 → 1.067 ms per pair of list calls"
+    },
+    {
+      "round": 8,
+      "area": "MCP bridge validation",
+      "change": "compiled schema patterns cached",
+      "measure": "0.47 → 0.17 µs per validated pattern"
+    },
+    {
+      "round": 9,
+      "area": "message send",
+      "change": "attachment lookup skipped when the request has no attachmentIds",
+      "measure": "0.88 µs per send"
+    },
+    {
+      "round": 10,
+      "area": "long-poll waiters",
+      "change": "earliest_available_id cached per (conversationId, messageRevision) across wakes",
+      "measure": "5.06 µs per wake per waiter"
+    }
+  ],
+  "note": "Rounds 2, 3, 5, 8, 9 and 10 are sub-10-µs per operation; they remove avoidable allocations or queries at the request/wake level. The measurable end-to-end items are rounds 1, 4, 6 and 7. All changes preserve response shapes and permissions; rosterRevision and messageRevision invalidation are documented in MAINTENANCE.md.",
+  "tests": "node --test: 174/174 passed (80.5 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "eabc51787b82ebfc5dd0a05af646714c7f0e13b98dcc7a96a88566a4a7f91e9c",
+    "build": "node --check on 17 modules: exit 0",
+    "targetedTests": "15/15 passed (30.9 s, includes 5 sentinel tests, legacy payload and visibility tests)",
+    "managedRevision": "1d012142d3ef2d910a8c1f0559b3383b72e9b575b6e538635498e9fc353deb97-8b6ee0e50e00",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "sentinel.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately",
+      "the project-commit CLI enforces a 1 MiB input JSON limit; this cumulative candidate exceeds it, so the commit was invoked through the extracted application_project source (same code)"
+    ],
+    "note": "cumulative candidate contains all 2026-11-14 changes: visibility, worker budget/paging, wake fan-out, language cache, payload digest and the ten micro-optimizations"
+  }
+}

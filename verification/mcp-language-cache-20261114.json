@@ -1,0 +1,73 @@
+{
+  "feature": "MCP bridge display-language cache",
+  "date": "2026-11-14",
+  "method": "spawn mcp.mjs, send one initialize request, measure spawn-to-response; vary the cache file %TEMP%/local-agent-chat-display-language.json",
+  "measurements": [
+    {
+      "case": "no cache",
+      "responseMs": 1121,
+      "language": "zh-CN",
+      "note": "PowerShell detection"
+    },
+    {
+      "case": "cache hit",
+      "responseMs": 56,
+      "language": "zh-CN"
+    },
+    {
+      "case": "cache hit (repeat)",
+      "responseMs": 58,
+      "language": "zh-CN"
+    },
+    {
+      "case": "fresh forged en-US cache",
+      "responseMs": 56,
+      "language": "en-US",
+      "note": "cache is authoritative until refresh"
+    },
+    {
+      "case": "cache older than 24h",
+      "responseMs": 1124,
+      "language": "zh-CN",
+      "note": "synchronous re-detection"
+    },
+    {
+      "case": "after stale refresh",
+      "responseMs": 55,
+      "language": "zh-CN"
+    },
+    {
+      "case": "2h cache hit (en-US) with background refresh",
+      "responseMs": 92,
+      "language": "en-US",
+      "note": "cache file became zh-CN about 2 s later"
+    }
+  ],
+  "note": "The value still comes from PowerShell (Get-WinUILanguageOverride, else Get-UICulture); Intl is only used on non-Windows. Cache is written atomically (temp + rename) with mode 0600, refreshed in the background after 1 hour, re-detected synchronously after 24 hours. A language change therefore appears on the next connection once the cache has been refreshed (within about an hour), or immediately after deleting the cache file.",
+  "tests": "node --test: 173/173 passed (80.9 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "cdbf167cc0904736f699fa16839deaa0bd4324c4976a15c1b94867536b04a54f",
+    "build": "node --check on 17 modules: exit 0",
+    "targetedTests": "14/14 passed (30.0 s, includes 5 sentinel tests)",
+    "managedRevision": "5b673bdcfcbcdfee8cea6331c07780d29e721803207e2b3a31eed391a4a6cc52-69eec77901d4",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately"
+    ],
+    "note": "cumulative candidate contains the 2026-11-14 visibility, worker budget/paging, wake fan-out and language-cache changes"
+  }
+}

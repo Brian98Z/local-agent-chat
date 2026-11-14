@@ -1,0 +1,62 @@
+{
+  "feature": "message idempotency payload digest and read projection",
+  "date": "2026-11-14",
+  "method": "HTTP sends with clientMessageId, isolated data dirs, 2000 messages of ~6 KB Chinese text; state/page timings are client-visible averages over 15-20 requests; storage is chat.sqlite size after clean shutdown",
+  "storage": {
+    "messages": 2000,
+    "avgTextChars": 2006,
+    "beforeBytes": 24498176,
+    "afterBytes": 16408576,
+    "reductionPercent": 33,
+    "note": "before stored the full request JSON in clientPayload in addition to text; after stores sha256:<hex>"
+  },
+  "read": {
+    "dataset": "200 latest messages, each ~6 KB text and a ~6 KB payload on the legacy rows",
+    "beforeLegacyProjection": {
+      "stateIncludeMessages1AvgMs": 25.78,
+      "page200AvgMs": 23.7
+    },
+    "afterProjectionLegacyRows": {
+      "stateIncludeMessages1AvgMs": 22.39,
+      "page200AvgMs": 18.3
+    },
+    "afterProjectionAndDigestRows": {
+      "stateIncludeMessages1AvgMs": 18.52,
+      "page200AvgMs": 16.84
+    },
+    "note": "all responses already stripped clientPayload; selecting it only cost SQLite/JS copying. Byte counts are unchanged because text dominates."
+  },
+  "idempotency": {
+    "sameKeySameContent": "same message id, one row",
+    "sameKeyDifferentContent": "HTTP 409",
+    "storedPrefix": "sha256:",
+    "legacyJsonRetry": "same message id and the row was rewritten to a digest"
+  },
+  "note": "The digest is computed only when clientMessageId is present. Legacy JSON payloads are compared by exact string first, then by re-serialized JSON, so old rows keep idempotent retry semantics and shrink on their next successful retry.",
+  "tests": "node --test: 174/174 passed (81.2 s)",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "73c3ad5353ac35b325eefda1c6bbbde7021dfe0b8198418f4f12790affd7adbe",
+    "build": "node --check on 17 modules: exit 0",
+    "targetedTests": "15/15 passed (29.8 s, includes 5 sentinel tests and the legacy payload test)",
+    "managedRevision": "fc7ba96eff9bfc1ae7840caf04639a10e6487ed2719f8504349d150e57ac77f4-f81c5865875e",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "MCP.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "mcp.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately"
+    ],
+    "note": "cumulative candidate contains the 2026-11-14 visibility, worker budget/paging, wake fan-out, language-cache and payload-digest changes"
+  }
+}

@@ -150,34 +150,51 @@ let roster = [];
 let conversations = [];
 const transcripts = new Map();
 
-try {
-  roster = ((await readTool('chat_agents')).agents || []);
-} catch (error) { notes.push(`成员名册获取失败：${error.message}`); }
-try {
-  conversations = (await readTool('chat_conversations')).conversations || [];
-} catch (error) { notes.push(`对话列表获取失败：${error.message}`); }
+// The two independent list calls share one round trip instead of waiting for each other.
+const [rosterResult, conversationsResult] = await Promise.allSettled([readTool('chat_agents'), readTool('chat_conversations')]);
+if (rosterResult.status === 'fulfilled') roster = rosterResult.value.agents || [];
+else notes.push(`成员名册获取失败：${rosterResult.reason.message}`);
+if (conversationsResult.status === 'fulfilled') conversations = conversationsResult.value.conversations || [];
+else notes.push(`对话列表获取失败：${conversationsResult.reason.message}`);
 
 let remaining = maxChars;
+// Lower bound on the characters these rows will add to the prompt: the formatter emits
+// "#id sender→target: body\n", so body length plus one newline can never exceed it.
+// Once the bound reaches maxChars the formatter stops inside this transcript and never
+// reaches later conversations, so fetching them would only waste requests and memory.
+let spent = 0;
 for (const conversation of conversations) {
   const rows = [];
+  // latestMessageId is the newest message visible to this member at list time.
+  // 0 means nothing visible: reading it would only produce an empty page.
+  const latest = Number.isSafeInteger(conversation.latestMessageId) ? conversation.latestMessageId : null;
   let after = 0;
   let scanned = 0;
-  try {
-    for (;;) {
-      const page = await readTool('chat_read', { conversationId: conversation.id, after, limit: 200 });
-      const messages = page.messages || [];
-      scanned += messages.length;
-      // Worker replies may be broadcast: never inject private history into its context.
-      for (const message of messages) if (message.to == null) rows.push(message);
-      const cursor = Number(page.cursor ?? after);
-      if (messages.length < 200 || cursor === after || scanned >= maxMessages) break;
-      after = cursor;
-      if (Date.now() - startedAt > apiTimeout) { notes.push(`对话 ${conversation.id} 分页超时，已截断。`); break; }
+  if (latest !== 0) {
+    try {
+      for (;;) {
+        const page = await readTool('chat_read', { conversationId: conversation.id, after, limit: 200 });
+        const messages = page.messages || [];
+        scanned += messages.length;
+        // Worker replies may be broadcast: never inject private history into its context.
+        for (const message of messages) {
+          if (message.to != null) continue;
+          rows.push(message);
+          spent += Math.min(String(message.text ?? '').length, 1200) + 1;
+        }
+        const cursor = Number(page.cursor ?? after);
+        // Reached the newest visible message; an extra request would only return an empty page.
+        if (latest !== null && cursor >= latest) break;
+        if (messages.length < 200 || cursor === after || scanned >= maxMessages || spent >= maxChars) break;
+        after = cursor;
+        if (Date.now() - startedAt > apiTimeout) { notes.push(`对话 ${conversation.id} 分页超时，已截断。`); break; }
+      }
+    } catch (error) {
+      notes.push(`对话 ${conversation.id} 读取失败：${error.message}`);
     }
-  } catch (error) {
-    notes.push(`对话 ${conversation.id} 读取失败：${error.message}`);
   }
   transcripts.set(conversation.id, rows.slice(0, maxMessages));
+  if (spent >= maxChars) break;
 }
 
 const lines = [];

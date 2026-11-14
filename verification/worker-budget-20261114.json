@@ -1,0 +1,102 @@
+{
+  "feature": "sentinel worker prompt budget and paging bounds",
+  "date": "2026-11-14",
+  "tests": "node --test: 173/173 passed (81.5 s)",
+  "method": "worker run against a counting HTTP proxy in front of the chat server and a fixed stub model endpoint; augmented.txt compared byte-for-byte (SHA256) between the git HEAD worker and the changed worker",
+  "stage1Budget": {
+    "dataset": "40 conversations × 200 broadcast messages",
+    "note": "after = budget short-circuit only",
+    "runs": [
+      {
+        "maxChars": 60000,
+        "beforeRequests": 86,
+        "afterRequests": 12,
+        "beforeMs": 545,
+        "afterMs": 249,
+        "augmentedBytes": 62048,
+        "sha256": "0cbb1a82cec74d9e94a5f562884df5ff67ae8a4c82e50e1d73e63f82e2d10036",
+        "equal": true
+      },
+      {
+        "maxChars": 5000,
+        "beforeRequests": 86,
+        "afterRequests": 6,
+        "beforeMs": 557,
+        "afterMs": 235,
+        "augmentedBytes": 6873,
+        "sha256": "35a2a5eab1f64b175fc774b56c9e26f2922974d2bbf44d482b329cd74365f673",
+        "equal": true
+      },
+      {
+        "maxChars": 1000000,
+        "beforeRequests": 86,
+        "afterRequests": 86,
+        "beforeMs": 581,
+        "afterMs": 581,
+        "augmentedBytes": 811385,
+        "sha256": "8fdfbbb8fdba6bfeb0868607cd95b7a971aa0567084571e6842fd106acbd86e1",
+        "equal": true
+      }
+    ]
+  },
+  "stage2Paging": {
+    "dataset": "40 conversations × 200 broadcast messages + 2 empty conversations",
+    "note": "before = git HEAD worker; after = budget + latestMessageId paging bounds",
+    "runs": [
+      {
+        "maxChars": 60000,
+        "beforeRequests": 88,
+        "afterRequests": 9,
+        "beforeMs": 560,
+        "afterMs": 241,
+        "augmentedBytes": 62260,
+        "sha256": "ff0332461570fa51315e87a3e259e2783e3950c0627c4d632889fc5e0464b746",
+        "equal": true
+      },
+      {
+        "maxChars": 5000,
+        "beforeRequests": 88,
+        "afterRequests": 6,
+        "beforeMs": 570,
+        "afterMs": 231,
+        "augmentedBytes": 7085,
+        "sha256": "5580244a3050ad355346782bf2ecb91982f4d3966b0ae3b9025352ea5c23db58",
+        "equal": true
+      },
+      {
+        "maxChars": 1000000,
+        "beforeRequests": 88,
+        "afterRequests": 45,
+        "beforeMs": 568,
+        "afterMs": 505,
+        "augmentedBytes": 811597,
+        "sha256": "8faf70e589ba6fb148ff8b523254f980a99807d5e2a3866c68572831c2d2881d",
+        "equal": true
+      }
+    ]
+  },
+  "note": "Budget: stop fetching once sum(min(message length,1200)+1) reaches --max-chars. Paging: latestMessageId===0 skips the read; cursor >= latestMessageId stops before an extra confirming page; a missing field keeps the old page-by-page behaviour. Both preserve the injected prompt because the formatter truncates at the same point and the skipped requests return no visible messages.",
+  "autoforge": {
+    "version": "0.1.1 windows-x64",
+    "module": "applications cycle",
+    "status": "PASS",
+    "rounds": 1,
+    "candidateSha256": "5650053a1fefcbb818b15183d86554a6eb3bb896542c6a1ec87337c8fe21275d",
+    "build": "node --check on 17 modules: exit 0",
+    "targetedTests": "14/14 passed (31.6 s, includes 5 sentinel tests)",
+    "managedRevision": "a38b2f42f162e63ceef8cdbe33cefd87857a5b99bd4cc503f0307fc846f742d4-82a4c1c77bf4",
+    "commitDiff": [
+      "CHANGELOG.md",
+      "MAINTENANCE.md",
+      "agent-chat-sentinel/worker.mjs",
+      "chat.test.mjs",
+      "server.mjs"
+    ],
+    "scope": "adapter-reported build/test only; no runtime or deployment claim",
+    "limitations": [
+      "operator-owned adapters run outside a sandbox",
+      "test_pass covers the targeted acceptance subset; the full node --test suite was run separately"
+    ],
+    "note": "cumulative candidate also contains the 2026-11-14 member visibility change (verification/visibility-query-20261114.json)"
+  }
+}
